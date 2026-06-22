@@ -207,7 +207,7 @@ var GRID = 90;
 // ---------- Game state ----------
 var gameState = 'start'; // start | playing | gameover
 var camX=0, camY=0, shake=0;
-var player, bullets, zombies, particles, pickups, floaters;
+var player, bullets, zombies, particles, pickups, floaters, decals, embers;
 var wave, waveTimer, spawnQueue, spawnTimer, waveBanner, waveBannerTime, betweenWaves, betweenTimer;
 var killsThisWave, totalKills;
 var finalScore=0, finalWave=0;
@@ -217,9 +217,11 @@ function resetGame(){
     x:0, y:0, angle:0, hp:100, maxHp:100,
     speed:280, fireRate:6.5, lastShot:0,
     shieldTime:0, rapidTime:0, invuln:0,
-    score:0, combo:1, comboTimer:0
+    score:0, combo:1, comboTimer:0,
+    muzzleFlash:0, walkPhase:0
   };
   bullets = []; zombies = []; particles = []; pickups = []; floaters = [];
+  decals = []; embers = [];
   wave = 0; waveBanner=''; waveBannerTime=0; betweenWaves=true; betweenTimer=1.2;
   killsThisWave=0; totalKills=0; spawnQueue=0; spawnTimer=0;
   camX=0; camY=0; shake=0;
@@ -239,6 +241,34 @@ function spawnParticles(x,y,color,n,speed,life){
     var a = Math.random()*Math.PI*2;
     var sp = (0.4+Math.random()*0.6)*speed;
     particles.push({x:x,y:y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:life,maxLife:life,color:color,size:2+Math.random()*3});
+  }
+}
+
+var DECAL_MAX = 70;
+function addDecal(x,y,r,color){
+  var blobs = [];
+  var n = 3+Math.floor(Math.random()*3);
+  for (var i=0;i<n;i++){
+    blobs.push({ox:(Math.random()-0.5)*r*1.5, oy:(Math.random()-0.5)*r*1.5, rr:r*(0.35+Math.random()*0.55)});
+  }
+  decals.push({x:x,y:y,color:color,alpha:0.55,blobs:blobs});
+  if (decals.length>DECAL_MAX) decals.shift();
+}
+
+var EMBER_MAX = 28;
+function updateEmbers(dt){
+  for (var i=embers.length-1;i>=0;i--){
+    var e = embers[i];
+    e.x += e.vx*dt; e.y += e.vy*dt; e.life -= dt;
+    if (e.life<=0) embers.splice(i,1);
+  }
+  if (embers.length<EMBER_MAX && Math.random()<dt*6){
+    var a = Math.random()*Math.PI*2, r = Math.random()*Math.max(W,H)*0.7;
+    embers.push({
+      x:player.x+Math.cos(a)*r, y:player.y+Math.sin(a)*r,
+      vx:(Math.random()-0.5)*10, vy:-8-Math.random()*14,
+      life:4+Math.random()*3, maxLife:7, size:1+Math.random()*1.8
+    });
   }
 }
 
@@ -269,13 +299,20 @@ function zombieTypeForWave(){
 }
 
 var ZTYPES = {
-  walker:{hp:30, speed:70, r:22, dmg:8, color:'#39ff8a', glow:'#0fff7a', score:10},
-  runner:{hp:18, speed:150, r:17, dmg:6, color:'#ff7a39', glow:'#ff5500', score:15},
-  brute:{hp:120, speed:48, r:34, dmg:18, color:'#b53bff', glow:'#9000ff', score:30},
-  boss:{hp:900, speed:40, r:62, dmg:30, color:'#ff2050', glow:'#ff0040', score:300}
+  walker:{hp:30, speed:70, r:22, dmg:8, color:'#39ff8a', glow:'#0fff7a', score:10,
+    skin:'#1d6b3d', skinHi:'#39ff8a', eye:'#c6ffe0', blood:'#0c3a1e'},
+  runner:{hp:18, speed:150, r:17, dmg:6, color:'#ff7a39', glow:'#ff5500', score:15,
+    skin:'#8a2f12', skinHi:'#ff7a39', eye:'#ffd9b0', blood:'#4a1606'},
+  brute:{hp:120, speed:48, r:34, dmg:18, color:'#b53bff', glow:'#9000ff', score:30,
+    skin:'#4a1170', skinHi:'#b53bff', eye:'#ecd0ff', blood:'#2b0a44'},
+  boss:{hp:900, speed:40, r:62, dmg:30, color:'#ff2050', glow:'#ff0040', score:300,
+    skin:'#5c0018', skinHi:'#ff2050', eye:'#ffd0de', blood:'#400012'}
 };
 
+var MAX_ZOMBIES = 140;
+
 function spawnZombie(type){
+  if (zombies.length >= MAX_ZOMBIES) return;
   var def = ZTYPES[type];
   var x=0, y=0, tries=0;
   do {
@@ -287,7 +324,9 @@ function spawnZombie(type){
   zombies.push({
     x:x, y:y, type:type, hp:def.hp*(1+wave*0.04), maxHp:def.hp*(1+wave*0.04),
     speed:def.speed, r:def.r, dmg:def.dmg, color:def.color, glow:def.glow, score:def.score,
-    flash:0, wob:Math.random()*Math.PI*2, hitCooldown:0
+    skin:def.skin, skinHi:def.skinHi, eye:def.eye, blood:def.blood,
+    flash:0, wob:Math.random()*Math.PI*2, hitCooldown:0,
+    angle:Math.random()*Math.PI*2, anim:Math.random()*Math.PI*2
   });
 }
 
@@ -309,6 +348,7 @@ function damagePlayer(amount){
 
 function killZombie(z, idx){
   spawnParticles(z.x,z.y,z.glow,16,260,0.55);
+  addDecal(z.x,z.y,z.r*(z.type==='boss'?1.8:1.2),z.blood);
   shake = Math.min(shake+ (z.type==='boss'?16:3), 22);
   var gained = Math.floor(z.score*player.combo);
   player.score += gained;
@@ -340,6 +380,7 @@ function fireBullet(){
     vy: Math.sin(player.angle)*speed,
     life: 1.1, dmg: 11 + (player.rapidTime>0?3:0)
   });
+  player.muzzleFlash = 0.06;
   SFX.shoot();
 }
 
@@ -356,6 +397,8 @@ function update(dt){
   player.y += mvy*player.speed*dt;
   var pd = Math.sqrt(player.x*player.x+player.y*player.y);
   if (pd > ARENA_R-30){ player.x = player.x/pd*(ARENA_R-30); player.y = player.y/pd*(ARENA_R-30); }
+  if (mlen > 0.1) player.walkPhase += dt*9;
+  if (player.muzzleFlash>0) player.muzzleFlash -= dt;
 
   // aim/fire
   var aim = Math.sqrt(stickR.dx*stickR.dx + stickR.dy*stickR.dy);
@@ -392,6 +435,8 @@ function update(dt){
     var mlen2 = Math.sqrt(mx*mx+my*my)||1;
     z.x += (mx/mlen2)*z.speed*dt;
     z.y += (my/mlen2)*z.speed*dt;
+    z.angle = Math.atan2(my/mlen2, mx/mlen2);
+    z.anim += dt*(0.6+z.speed*0.05);
     if (z.flash>0) z.flash -= dt;
     if (z.hitCooldown>0) z.hitCooldown -= dt;
 
@@ -458,6 +503,13 @@ function update(dt){
     }
   }
 
+  // decals fade
+  for (var di=decals.length-1; di>=0; di--){
+    decals[di].alpha -= dt*0.035;
+    if (decals[di].alpha<=0.02) decals.splice(di,1);
+  }
+  updateEmbers(dt);
+
   // shake decay
   if (shake>0) shake = Math.max(0, shake-dt*40);
 
@@ -517,6 +569,103 @@ function drawGlowCircle(x,y,r,color,glow,alpha){
   ctx.restore();
 }
 
+function drawZombie(zz, sx, sy){
+  var scale = zz.r/22;
+  var legSwing = Math.sin(zz.anim)*0.6;
+  var armSwing = Math.sin(zz.anim+Math.PI)*0.5;
+  var flashed = zz.flash>0;
+  var skin = flashed?'#ffffff':zz.skin;
+  var hi = flashed?'#ffffff':zz.skinHi;
+  var eye = flashed?'#ffffff':zz.eye;
+
+  ctx.save();
+  ctx.translate(sx,sy);
+  ctx.rotate(zz.angle||0);
+  ctx.shadowColor = hi; ctx.shadowBlur = 13;
+
+  // legs, dragging/shambling
+  ctx.strokeStyle = skin; ctx.lineWidth = 6*scale; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(-4*scale, 4*scale);
+  ctx.lineTo(-13*scale - legSwing*7*scale, 13*scale + Math.abs(legSwing)*4*scale);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-4*scale, -4*scale);
+  ctx.lineTo(-13*scale + legSwing*7*scale, -13*scale - Math.abs(legSwing)*4*scale);
+  ctx.stroke();
+
+  // torso
+  var tg = ctx.createRadialGradient(2*scale,0,2*scale, 0,0,13*scale);
+  tg.addColorStop(0, hi); tg.addColorStop(1, skin);
+  ctx.fillStyle = tg;
+  ctx.beginPath();
+  ctx.ellipse(0,0, 11*scale, 8.5*scale, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // arms reaching toward target
+  ctx.strokeStyle = skin; ctx.lineWidth = 4.5*scale;
+  ctx.beginPath();
+  ctx.moveTo(3*scale, 5.5*scale);
+  ctx.lineTo(17*scale + armSwing*6*scale, 9*scale + armSwing*3*scale);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(3*scale, -5.5*scale);
+  ctx.lineTo(17*scale - armSwing*6*scale, -9*scale - armSwing*3*scale);
+  ctx.stroke();
+
+  // head
+  ctx.fillStyle = hi;
+  ctx.beginPath(); ctx.arc(8*scale, 0, 6.5*scale, 0, Math.PI*2); ctx.fill();
+
+  // glowing eyes
+  ctx.shadowBlur = 9; ctx.shadowColor = eye; ctx.fillStyle = eye;
+  ctx.beginPath(); ctx.arc(10.5*scale, -2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(10.5*scale, 2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawBoss(zz, sx, sy){
+  var pulse = 0.85+Math.sin(performance.now()/200)*0.15;
+  var flashed = zz.flash>0;
+  var skin = flashed?'#ffffff':zz.skin, hi = flashed?'#ffffff':zz.skinHi, eye = flashed?'#ffffff':zz.eye;
+
+  ctx.save();
+  ctx.translate(sx,sy);
+  ctx.rotate(zz.angle||0);
+
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = hi; ctx.shadowColor = hi; ctx.shadowBlur = 30; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(0,0, zz.r*1.5*pulse, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+
+  ctx.shadowColor = hi; ctx.shadowBlur = 22;
+  ctx.fillStyle = skin;
+  for (var i=0;i<8;i++){
+    var a = i/8*Math.PI*2 + zz.anim*0.3;
+    var bx = Math.cos(a)*zz.r*0.6, by = Math.sin(a)*zz.r*0.6;
+    var tx = Math.cos(a)*zz.r*1.15, ty = Math.sin(a)*zz.r*1.15;
+    ctx.beginPath();
+    ctx.moveTo(bx+Math.cos(a+1.6)*4, by+Math.sin(a+1.6)*4);
+    ctx.lineTo(tx,ty);
+    ctx.lineTo(bx+Math.cos(a-1.6)*4, by+Math.sin(a-1.6)*4);
+    ctx.closePath(); ctx.fill();
+  }
+
+  var g = ctx.createRadialGradient(0,0,zz.r*0.2,0,0,zz.r);
+  g.addColorStop(0,hi); g.addColorStop(1,skin);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(0,0, zz.r*0.85, 0, Math.PI*2); ctx.fill();
+
+  ctx.shadowBlur = 18; ctx.shadowColor = eye; ctx.fillStyle = eye;
+  ctx.beginPath(); ctx.arc(zz.r*0.15,0, zz.r*0.22*pulse, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(zz.r*0.55,-zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(zz.r*0.55, zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+}
+
 function draw(){
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = '#05030c';
@@ -552,6 +701,36 @@ function draw(){
   ctx.stroke();
   ctx.restore();
 
+  // ambient embers (floor-level atmosphere)
+  for (var em=0; em<embers.length; em++){
+    var e = embers[em];
+    var s = worldToScreen(e.x,e.y);
+    var ea = (e.life/e.maxLife);
+    drawGlowCircle(s[0],s[1],e.size,'#ffaa50','#ff9a40',ea*0.6);
+  }
+
+  // player floor spotlight
+  var psx = worldToScreen(player.x,player.y);
+  var spot = ctx.createRadialGradient(psx[0],psx[1],0,psx[0],psx[1],230);
+  spot.addColorStop(0,'rgba(80,220,255,0.10)');
+  spot.addColorStop(1,'rgba(80,220,255,0)');
+  ctx.fillStyle = spot;
+  ctx.beginPath(); ctx.arc(psx[0],psx[1],230,0,Math.PI*2); ctx.fill();
+
+  // blood decals on the floor
+  for (var dc=0; dc<decals.length; dc++){
+    var d = decals[dc];
+    var s = worldToScreen(d.x,d.y);
+    ctx.save();
+    ctx.globalAlpha = d.alpha;
+    ctx.fillStyle = d.color;
+    for (var bb=0; bb<d.blobs.length; bb++){
+      var blob = d.blobs[bb];
+      ctx.beginPath(); ctx.arc(s[0]+blob.ox, s[1]+blob.oy, blob.rr, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // pickups
   for (var pk=0; pk<pickups.length; pk++){
     var pu = pickups[pk];
@@ -578,8 +757,8 @@ function draw(){
   for (var z=0; z<zombies.length; z++){
     var zz = zombies[z];
     var s = worldToScreen(zz.x,zz.y);
-    var col = zz.flash>0 ? '#ffffff' : zz.color;
-    drawGlowCircle(s[0],s[1],zz.r,col,zz.glow,1);
+    if (zz.type==='boss') drawBoss(zz, s[0], s[1]);
+    else drawZombie(zz, s[0], s[1]);
     // health notch
     if (zz.hp < zz.maxHp){
       var hbw = zz.r*2;
@@ -613,12 +792,51 @@ function draw(){
     if (player.invuln>0 && Math.floor(performance.now()/60)%2===0){
       ctx.globalAlpha = 0.4;
     }
-    ctx.shadowColor = '#0ff'; ctx.shadowBlur = 20;
-    ctx.fillStyle = '#bdfcff';
+
+    var moving = (Math.sqrt(stickL.dx*stickL.dx+stickL.dy*stickL.dy) > 0.12);
+    var legSwing = moving ? Math.sin(player.walkPhase)*0.6 : 0;
+
+    // legs
+    ctx.shadowColor = '#0ff'; ctx.shadowBlur = 14;
+    ctx.strokeStyle = '#0a3a42'; ctx.lineWidth = 6; ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(22,0); ctx.lineTo(-16,14); ctx.lineTo(-8,0); ctx.lineTo(-16,-14);
+    ctx.moveTo(-4,4); ctx.lineTo(-15 - legSwing*8, 11 + Math.abs(legSwing)*4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-4,-4); ctx.lineTo(-15 + legSwing*8, -11 - Math.abs(legSwing)*4);
+    ctx.stroke();
+
+    // armored torso
+    ctx.shadowBlur = 20;
+    var tgrad = ctx.createLinearGradient(-10,0,16,0);
+    tgrad.addColorStop(0,'#0a4450'); tgrad.addColorStop(1,'#7be8ff');
+    ctx.fillStyle = tgrad;
+    ctx.beginPath();
+    ctx.moveTo(15,0); ctx.lineTo(3,10); ctx.lineTo(-11,6); ctx.lineTo(-11,-6); ctx.lineTo(3,-10);
     ctx.closePath(); ctx.fill();
-    ctx.strokeStyle='#0ff'; ctx.lineWidth=2; ctx.stroke();
+    ctx.strokeStyle = '#bdfcff'; ctx.lineWidth = 1.5; ctx.stroke();
+
+    // head / visor
+    ctx.fillStyle = '#0c2530';
+    ctx.beginPath(); ctx.arc(10,0,6,0,Math.PI*2); ctx.fill();
+    ctx.shadowColor = '#7df9ff'; ctx.shadowBlur = 14;
+    ctx.fillStyle = '#7df9ff';
+    ctx.beginPath(); ctx.ellipse(11.5,0,3.4,2.2,0,0,Math.PI*2); ctx.fill();
+
+    // gun barrel
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = '#dfeff2';
+    ctx.fillRect(14,-2,15,4);
+
+    // muzzle flash
+    if (player.muzzleFlash>0){
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, player.muzzleFlash/0.06);
+      ctx.fillStyle = '#fff7cf'; ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 26;
+      ctx.beginPath(); ctx.moveTo(29,0); ctx.lineTo(42,-6); ctx.lineTo(42,6); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
     ctx.restore();
   }
 
