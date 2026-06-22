@@ -10,13 +10,15 @@
 <title>NEON VOID // Dead Arcade</title>
 <style>
   html,body{
+    position:fixed; inset:0;
     margin:0; padding:0; width:100%; height:100%;
     background:#05030c; overflow:hidden;
-    touch-action:none; -webkit-user-select:none; user-select:none;
+    touch-action:none; overscroll-behavior:none;
+    -webkit-user-select:none; user-select:none;
     -webkit-touch-callout:none;
     font-family:-apple-system,Helvetica,Arial,sans-serif;
   }
-  #c{ display:block; width:100vw; height:100vh; background:#05030c; }
+  #c{ display:block; width:100vw; height:100vh; background:#05030c; touch-action:none; overscroll-behavior:none; }
   #orient{
     position:fixed; inset:0; background:#05030c; color:#0ff;
     display:none; align-items:center; justify-content:center;
@@ -110,7 +112,8 @@ var SFX = {
 // ---------- Input: dual virtual joysticks ----------
 var stickL = {active:false, id:null, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
 var stickR = {active:false, id:null, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
-var STICK_R_MAX = 55;
+var STICK_R_MAX = 75;
+var STICK_DEADZONE = 0.18;
 
 function touchAssign(t){
   var isLeft = t.clientX < W/2;
@@ -127,9 +130,15 @@ function touchUpdate(t){
   if (!s) return;
   var dx = t.clientX - s.baseX, dy = t.clientY - s.baseY;
   var d = Math.sqrt(dx*dx+dy*dy);
-  if (d > STICK_R_MAX){ dx = dx/d*STICK_R_MAX; dy = dy/d*STICK_R_MAX; }
+  if (d > STICK_R_MAX){ dx = dx/d*STICK_R_MAX; dy = dy/d*STICK_R_MAX; d = STICK_R_MAX; }
   s.x = s.baseX+dx; s.y = s.baseY+dy;
-  s.dx = dx/STICK_R_MAX; s.dy = dy/STICK_R_MAX;
+  var norm = d/STICK_R_MAX;
+  if (norm < STICK_DEADZONE){
+    s.dx = 0; s.dy = 0;
+  } else {
+    var ramp = (norm-STICK_DEADZONE)/(1-STICK_DEADZONE);
+    s.dx = (dx/d)*ramp; s.dy = (dy/d)*ramp;
+  }
 }
 function touchClear(t){
   if (stickL.active && stickL.id === t.identifier){ stickL.active=false; stickL.id=null; stickL.dx=0; stickL.dy=0; }
@@ -137,7 +146,7 @@ function touchClear(t){
 }
 canvas.addEventListener('touchstart', function(e){
   ensureAudio();
-  if (gameState === 'start'){ startGame(); }
+  if (gameState === 'start'){ requestFS(); startGame(); }
   else if (gameState === 'gameover'){ resetGame(); gameState='start'; startGame(); }
   for (var i=0;i<e.changedTouches.length;i++) touchAssign(e.changedTouches[i]);
   e.preventDefault();
@@ -177,6 +186,19 @@ window.addEventListener('mouseup', function(){
   if (stickL.id==='mouse'){ stickL.active=false; stickL.id=null; stickL.dx=0; stickL.dy=0; }
   if (stickR.id==='mouse'){ stickR.active=false; stickR.id=null; stickR.dx=0; stickR.dy=0; }
 });
+
+// Block iOS pinch-zoom / Safari gesture events and any stray scroll
+['gesturestart','gesturechange','gestureend'].forEach(function(evt){
+  document.addEventListener(evt, function(e){ e.preventDefault(); });
+});
+document.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
+document.addEventListener('dblclick', function(e){ e.preventDefault(); });
+
+function requestFS(){
+  var el = document.documentElement;
+  var req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (req){ try{ req.call(el); }catch(e){} }
+}
 
 // ---------- Game constants ----------
 var ARENA_R = 1700;
