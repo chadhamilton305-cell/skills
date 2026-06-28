@@ -153,8 +153,8 @@ var SFX = {
 // (matched by identifier) lifts. Every event reconciles against e.touches
 // (the authoritative "what's still down" list) so a flaky touchend/
 // touchcancel on one finger can never drop or freeze the other stick.
-var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null, lastMoveT:0};
-var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null, lastMoveT:0};
+var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null};
+var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null};
 var STICK_R_MAX = 85;
 var STICK_DEADZONE = 0.06;
 // Raw touch coordinates carry a few pixels of digitizer noise every event.
@@ -177,9 +177,9 @@ function updateStickAnchors(){
   stickL.baseX = stickL.anchorX; stickL.baseY = stickL.anchorY;
   stickR.baseX = stickR.anchorX; stickR.baseY = stickR.anchorY;
   if (!stickL.active){ stickL.x=stickL.anchorX; stickL.y=stickL.anchorY; }
-  else if (stickL.lastClientX != null) stickMoveTo(stickL, {clientX:stickL.lastClientX, clientY:stickL.lastClientY});
+  else recomputeStick(stickL);
   if (!stickR.active){ stickR.x=stickR.anchorX; stickR.y=stickR.anchorY; }
-  else if (stickR.lastClientX != null) stickMoveTo(stickR, {clientX:stickR.lastClientX, clientY:stickR.lastClientY});
+  else recomputeStick(stickR);
 }
 
 function findTouchById(touchList, id){
@@ -192,8 +192,9 @@ function stickActivate(s, t){
   s.baseX = s.anchorX; s.baseY = s.anchorY;
   // Snap the smoothing filter straight to the grab point so there's no
   // catch-up lag on the very first frame -- only later jitter gets damped.
-  s.smX = t.clientX; s.smY = t.clientY; s.lastMoveT = performance.now();
-  stickMoveTo(s, t);
+  s.smX = t.clientX; s.smY = t.clientY;
+  s.lastClientX = t.clientX; s.lastClientY = t.clientY;
+  recomputeStick(s);
 }
 function stickRelease(s){
   s.active=false; s.id=null; s.dx=0; s.dy=0;
@@ -202,17 +203,21 @@ function stickRelease(s){
   s.lastClientX = null; s.lastClientY = null;
   s.smX = null; s.smY = null;
 }
-function stickMoveTo(s, t){
+// Records where the finger actually is right now. This does NOT advance the
+// smoothing filter -- that happens once per simulation tick in stickTick(),
+// driven by the clock, not by event arrival. Driving it from here was the
+// bug: a real "flick to a direction and hold" drag fires a burst of
+// touchmove events while the finger is moving, then NONE while it's held
+// still (nothing moved, so the browser has nothing to report). With the
+// filter only advanced inside this handler, that meant the held position
+// got abandoned mid-convergence the instant the finger stopped, so the
+// player only ever felt a fraction of the intended push -- often not even
+// enough to clear the deadzone, which read as "doesn't track direction,
+// doesn't start walking" for exactly the most natural joystick gesture.
+function stickSetTarget(s, t){
   s.lastClientX = t.clientX; s.lastClientY = t.clientY;
-  var now = performance.now();
-  var elapsed = Math.min(0.1, Math.max(0, (now-(s.lastMoveT||now))/1000));
-  s.lastMoveT = now;
-  if (s.smX == null){ s.smX = t.clientX; s.smY = t.clientY; }
-  else {
-    var alpha = 1 - Math.exp(-elapsed/STICK_SMOOTH_TAU);
-    s.smX += (t.clientX-s.smX)*alpha;
-    s.smY += (t.clientY-s.smY)*alpha;
-  }
+}
+function recomputeStick(s){
   var dx = s.smX - s.baseX, dy = s.smY - s.baseY;
   var d = Math.sqrt(dx*dx+dy*dy);
   if (d > STICK_R_MAX){ dx = dx/d*STICK_R_MAX; dy = dy/d*STICK_R_MAX; d = STICK_R_MAX; }
@@ -224,6 +229,17 @@ function stickMoveTo(s, t){
     var ramp = (norm-STICK_DEADZONE)/(1-STICK_DEADZONE);
     s.dx = (dx/d)*ramp; s.dy = (dy/d)*ramp;
   }
+}
+// Advances the position-smoothing filter by one fixed simulation step and
+// recomputes dx/dy from it. Called every update() tick for every active
+// stick, so convergence toward the finger's last reported position keeps
+// going even while the finger is perfectly still (see stickSetTarget above).
+function stickTick(s, dt){
+  if (!s.active || s.lastClientX == null) return;
+  var alpha = 1 - Math.exp(-dt/STICK_SMOOTH_TAU);
+  s.smX += (s.lastClientX-s.smX)*alpha;
+  s.smY += (s.lastClientY-s.smY)*alpha;
+  recomputeStick(s);
 }
 
 // Safety net for the rare missed-touchend case (finger lifted but the
@@ -255,8 +271,8 @@ canvas.addEventListener('touchmove', function(e){
   // by an explicit touchend/touchcancel naming that exact identifier below.
   for (var i=0;i<e.touches.length;i++){
     var t = e.touches[i];
-    if (stickL.active && stickL.id === t.identifier) stickMoveTo(stickL, t);
-    else if (stickR.active && stickR.id === t.identifier) stickMoveTo(stickR, t);
+    if (stickL.active && stickL.id === t.identifier) stickSetTarget(stickL, t);
+    else if (stickR.active && stickR.id === t.identifier) stickSetTarget(stickR, t);
   }
   e.preventDefault();
 }, {passive:false});
@@ -284,13 +300,15 @@ canvas.addEventListener('mousedown', function(e){
   var s = e.clientX < W/2 ? stickL : stickR;
   s.active=true; s.id='mouse';
   s.baseX=s.anchorX; s.baseY=s.anchorY;
-  stickMoveTo(s, {clientX:e.clientX, clientY:e.clientY});
+  s.smX = e.clientX; s.smY = e.clientY;
+  s.lastClientX = e.clientX; s.lastClientY = e.clientY;
+  recomputeStick(s);
 });
 window.addEventListener('mousemove', function(e){
   if (!mouseDown) return;
   var s = (stickL.active && stickL.id==='mouse') ? stickL : (stickR.active && stickR.id==='mouse' ? stickR : null);
   if (!s) return;
-  stickMoveTo(s, {clientX:e.clientX, clientY:e.clientY});
+  stickSetTarget(s, {clientX:e.clientX, clientY:e.clientY});
 });
 window.addEventListener('mouseup', function(){
   mouseDown=false;
@@ -595,6 +613,11 @@ function fireBullet(){
 var lastT = performance.now();
 function update(dt){
   if (gameState !== 'playing') return;
+
+  // Advance each stick's position-smoothing filter on the simulation clock,
+  // not on touch-event arrival -- see stickTick()'s comment for why.
+  stickTick(stickL, dt);
+  stickTick(stickR, dt);
 
   // movement
   var mvx = stickL.dx||0, mvy = stickL.dy||0;
