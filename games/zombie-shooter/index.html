@@ -70,9 +70,18 @@ if (window.visualViewport){
 // position:fixed), but if any mobile browser quirk sneaks a scroll through
 // anyway, snap it back instantly so the canvas/joysticks never drift.
 window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:true});
-document.addEventListener('touchstart', function(e){
+// Capture phase on window is the earliest point JS can ever see a touch --
+// before it reaches any other listener, and before the browser's own
+// native scroll/rubber-band-bounce gesture recognition gets a chance to
+// claim the gesture. Blocking it here (rather than only at bubble phase on
+// document) is what actually stops the iOS/Android "pull down" page bounce,
+// since that native effect can start being claimed before a bubble-phase
+// preventDefault is processed.
+function blockNativeScroll(e){
   if (e.target !== orientEl && !orientEl.contains(e.target)) e.preventDefault();
-}, {passive:false});
+}
+window.addEventListener('touchstart', blockNativeScroll, {passive:false, capture:true});
+window.addEventListener('touchmove', blockNativeScroll, {passive:false, capture:true});
 function dismissOrient(e){
   orientDismissed = true;
   orientEl.classList.remove('show');
@@ -273,7 +282,6 @@ window.addEventListener('mouseup', function(){
 ['gesturestart','gesturechange','gestureend'].forEach(function(evt){
   document.addEventListener(evt, function(e){ e.preventDefault(); });
 });
-document.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
 document.addEventListener('dblclick', function(e){ e.preventDefault(); });
 
 function requestFS(){
