@@ -663,16 +663,19 @@ function update(dt){
     if (z.flash>0) z.flash -= dt;
     if (z.hitCooldown>0) z.hitCooldown -= dt;
 
-    // separation from other zombies (light)
-    for (var zj=0; zj<zombies.length; zj++){
-      if (zj===zi) continue;
+    // separation from other zombies (light) -- each pair checked once and
+    // pushed apart symmetrically, instead of every zombie scanning the
+    // whole array (was O(n^2) with double the work; same visual result).
+    for (var zj=zi-1; zj>=0; zj--){
       var o = zombies[zj];
       var sx = z.x-o.x, sy=z.y-o.y;
       var sd = Math.sqrt(sx*sx+sy*sy);
       var minD = z.r+o.r;
       if (sd>0 && sd < minD){
-        var push = (minD-sd)/minD*40*dt;
-        z.x += (sx/sd)*push; z.y += (sy/sd)*push;
+        var push = (minD-sd)/minD*20*dt;
+        var nxp = sx/sd, nyp = sy/sd;
+        z.x += nxp*push; z.y += nyp*push;
+        o.x -= nxp*push; o.y -= nyp*push;
       }
     }
 
@@ -799,6 +802,16 @@ function applyPickup(type){
 // ---------- Draw ----------
 function worldToScreen(x,y){
   return [x-camX+W/2, y-camY+H/2];
+}
+
+// Screen-space culling: with up to 140 zombies plus particles/embers/decals
+// all drawn with heavy shadowBlur, rendering everything in the 2200x1300
+// arena every frame (instead of just what's visible around the camera) was
+// the single biggest real-FPS cost on a phone-sized canvas. Skipping
+// off-screen entities here is what actually keeps frame time low, rather
+// than just tolerating low frame time after the fact.
+function isOnScreen(sx, sy, margin){
+  return sx > -margin && sx < W+margin && sy > -margin && sy < H+margin;
 }
 
 function drawGlowCircle(x,y,r,color,glow,alpha){
@@ -996,6 +1009,7 @@ function draw(){
   for (var ob=0; ob<obstacles.length; ob++){
     var oo = obstacles[ob];
     var os = worldToScreen(oo.x,oo.y);
+    if (!isOnScreen(os[0],os[1],80)) continue;
     drawObstacle(oo, os[0], os[1]);
   }
 
@@ -1003,6 +1017,7 @@ function draw(){
   for (var em=0; em<embers.length; em++){
     var e = embers[em];
     var s = worldToScreen(e.x,e.y);
+    if (!isOnScreen(s[0],s[1],40)) continue;
     var ea = (e.life/e.maxLife);
     drawGlowCircle(s[0],s[1],e.size,'#9a9286','#6b6458',ea*0.4);
   }
@@ -1019,6 +1034,7 @@ function draw(){
   for (var dc=0; dc<decals.length; dc++){
     var d = decals[dc];
     var s = worldToScreen(d.x,d.y);
+    if (!isOnScreen(s[0],s[1],60)) continue;
     ctx.save();
     ctx.globalAlpha = d.alpha;
     ctx.fillStyle = d.color;
@@ -1033,6 +1049,7 @@ function draw(){
   for (var pk=0; pk<pickups.length; pk++){
     var pu = pickups[pk];
     var s = worldToScreen(pu.x,pu.y);
+    if (!isOnScreen(s[0],s[1],40)) continue;
     var bob = Math.sin(pu.bob)*6;
     var pdef = PICKUP_DEFS[pu.type];
     drawGlowCircle(s[0],s[1]+bob,14,pdef.color,pdef.color,0.9);
@@ -1046,6 +1063,7 @@ function draw(){
   for (var p=0;p<particles.length;p++){
     var pa = particles[p];
     var s = worldToScreen(pa.x,pa.y);
+    if (!isOnScreen(s[0],s[1],40)) continue;
     var alpha = pa.life/pa.maxLife;
     drawGlowCircle(s[0],s[1],pa.size*alpha+1,pa.color,pa.color,alpha);
   }
@@ -1054,6 +1072,7 @@ function draw(){
   for (var z=0; z<zombies.length; z++){
     var zz = zombies[z];
     var s = worldToScreen(zz.x,zz.y);
+    if (!isOnScreen(s[0],s[1],zz.r+60)) continue;
     if (zz.type==='boss') drawBoss(zz, s[0], s[1]);
     else drawZombie(zz, s[0], s[1]);
     // health notch
@@ -1071,6 +1090,7 @@ function draw(){
   for (var bi=0; bi<bullets.length; bi++){
     var bl = bullets[bi];
     var s = worldToScreen(bl.x,bl.y);
+    if (!isOnScreen(s[0],s[1],20)) continue;
     drawGlowCircle(s[0],s[1],4,'#fffbe0','#ff5a3c',1);
   }
 
@@ -1141,6 +1161,7 @@ function draw(){
   for (var fl=0; fl<floaters.length; fl++){
     var f = floaters[fl];
     var s = worldToScreen(f.x,f.y);
+    if (!isOnScreen(s[0],s[1],60)) continue;
     ctx.save();
     ctx.globalAlpha = Math.max(0,f.life/f.maxLife);
     ctx.fillStyle = f.color;
@@ -1289,12 +1310,36 @@ function drawGameOver(){
 }
 
 // ---------- Main loop ----------
+// Fixed-timestep accumulator (Glenn Fiedler "Fix Your Timestep!" pattern).
+// The old code ran update(dt) once per render frame with dt hard-clamped to
+// 0.033s. On a phone that can't sustain 30fps (very plausible once a wave
+// fills the screen with zombies under heavy shadowBlur rendering), real
+// frame time was regularly >33ms, so each update() step only advanced the
+// simulation by the clamped 33ms even though more real time had passed --
+// the whole game quietly ran in slow motion, which read as "the character
+// isn't responsive" even though the joystick math itself was fine. Now we
+// accumulate real elapsed time and run as many fixed 1/60s update() steps
+// as needed to catch up, so movement speed tracks real time. MAX_STEPS
+// guards against a "spiral of death" if update() itself is ever the slow
+// part (rather than draw()): we cap catch-up work per frame and drop any
+// remaining backlog instead of trying to fully catch up.
+var FIXED_DT = 1/60;
+var MAX_FRAME_TIME = 0.25;
+var MAX_STEPS = 5;
+var accumulator = 0;
 function frame(t){
-  var dt = Math.min(0.033, (t-lastT)/1000);
+  var frameTime = Math.min(MAX_FRAME_TIME, (t-lastT)/1000);
   lastT = t;
+  accumulator += frameTime;
   camX = player.x; camY = player.y;
   try{
-    update(dt);
+    var steps = 0;
+    while (accumulator >= FIXED_DT && steps < MAX_STEPS){
+      update(FIXED_DT);
+      accumulator -= FIXED_DT;
+      steps++;
+    }
+    if (steps >= MAX_STEPS) accumulator = 0;
     draw();
   } catch(e){
     console.error('frame error', e);
