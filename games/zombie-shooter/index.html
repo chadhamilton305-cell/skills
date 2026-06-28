@@ -32,7 +32,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="orient"><div>ROTATE YOUR PHONE</div><div style="font-size:38px;margin-top:10px;">&#x21BB;</div><div style="font-size:12px;opacity:.6;margin-top:10px;">LANDSCAPE MODE RECOMMENDED</div></div>
+<div id="orient"><div>ROTATE YOUR PHONE</div><div style="font-size:38px;margin-top:10px;">&#x21BB;</div><div style="font-size:12px;opacity:.6;margin-top:10px;">LANDSCAPE MODE RECOMMENDED</div><div style="font-size:13px;margin-top:22px;color:#ff00aa;letter-spacing:1px;">TAP HERE TO PLAY ANYWAY</div></div>
 <script>
 (function(){
 "use strict";
@@ -42,6 +42,7 @@ var ctx = canvas.getContext('2d');
 var orientEl = document.getElementById('orient');
 var DPR = Math.min(window.devicePixelRatio || 1, 2.5);
 var W=0, H=0;
+var orientDismissed = false;
 
 function resize(){
   W = window.innerWidth; H = window.innerHeight;
@@ -50,10 +51,17 @@ function resize(){
   canvas.style.width = W+'px';
   canvas.style.height = H+'px';
   ctx.setTransform(DPR,0,0,DPR,0,0);
-  if (H>W) orientEl.classList.add('show'); else orientEl.classList.remove('show');
+  if (H>W && !orientDismissed) orientEl.classList.add('show'); else orientEl.classList.remove('show');
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', function(){ setTimeout(resize,150); });
+function dismissOrient(e){
+  orientDismissed = true;
+  orientEl.classList.remove('show');
+  if (e) e.preventDefault();
+}
+orientEl.addEventListener('touchstart', dismissOrient, {passive:false});
+orientEl.addEventListener('click', dismissOrient);
 resize();
 
 // ---------- Audio ----------
