@@ -6,21 +6,21 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
-<meta name="theme-color" content="#0a0907">
+<meta name="theme-color" content="#8b9476">
 <title>DEAD STREETS // Quarantine Block</title>
 <style>
   html,body{
     position:fixed; inset:0;
     margin:0; padding:0; width:100%; height:100%;
-    background:#0a0907; overflow:hidden;
+    background:#8b9476; overflow:hidden;
     touch-action:none; overscroll-behavior:none;
     -webkit-user-select:none; user-select:none;
     -webkit-touch-callout:none;
     font-family:-apple-system,Helvetica,Arial,sans-serif;
   }
-  #c{ display:block; width:100vw; height:100vh; background:#0a0907; touch-action:none; overscroll-behavior:none; }
+  #c{ display:block; width:100vw; height:100vh; background:#8b9476; touch-action:none; overscroll-behavior:none; }
   #orient{
-    position:fixed; inset:0; background:#0a0907; color:#c9b98a;
+    position:fixed; inset:0; background:#3a3f2e; color:#dcd3ae;
     display:none; align-items:center; justify-content:center;
     flex-direction:column; text-align:center; z-index:50;
     font-size:18px; letter-spacing:2px;
@@ -132,8 +132,23 @@ function noiseBurst(vol, dur){
   src.connect(filt); filt.connect(gain); gain.connect(actx.destination);
   src.start();
 }
+// Sharp rifle "crack": broadband noise transient narrowed to the upper-mid
+// band (where a gunshot's crack actually lives) rather than the duller
+// all-lowpass thump used for bullet impacts, so the two stay distinct.
+function crackBurst(vol, dur){
+  if (!actx) return;
+  var buf = getNoiseBuf(); if (!buf) return;
+  var src = actx.createBufferSource(); src.buffer = buf;
+  var gain = actx.createGain();
+  gain.gain.setValueAtTime(vol||0.2, actx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime+(dur||0.05));
+  var hp = actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=700;
+  var lp = actx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=5200;
+  src.connect(hp); hp.connect(lp); lp.connect(gain); gain.connect(actx.destination);
+  src.start();
+}
 var SFX = {
-  shoot:function(){ tone(880,0.06,'square',0.05,520); },
+  shoot:function(){ crackBurst(0.22,0.05); tone(95,0.05,'square',0.13,45); },
   hit:function(){ noiseBurst(0.12,0.08); },
   death:function(){ tone(300,0.25,'sawtooth',0.12,40); },
   hurt:function(){ tone(160,0.18,'sawtooth',0.15,60); },
@@ -357,7 +372,7 @@ var GRID = 90;
 // ---------- Game state ----------
 var gameState = 'start'; // start | playing | gameover
 var camX=0, camY=0, shake=0;
-var player, bullets, zombies, particles, pickups, floaters, decals, embers, obstacles;
+var player, bullets, zombies, particles, pickups, floaters, decals, embers, obstacles, groundTiles;
 var wave, waveTimer, spawnQueue, spawnTimer, waveBanner, waveBannerTime, betweenWaves, betweenTimer;
 var killsThisWave, totalKills;
 var finalScore=0, finalWave=0;
@@ -366,31 +381,118 @@ var OBSTACLE_DEFS = {
   dumpster:{w:74, h:42},
   crate:{w:34, h:34},
   car:{w:150, h:64},
-  trash:{w:30, h:24}
+  trash:{w:30, h:24},
+  house:{w:220, h:80}
 };
 
-function generateObstacles(){
-  var list = [];
-  var counts = {dumpster:6, crate:8, car:3, trash:10};
-  for (var type in counts){
-    for (var i=0;i<counts[type];i++){
-      var def = OBSTACLE_DEFS[type];
-      var x=0, y=0, tries=0, ok=false;
-      while (tries<20 && !ok){
-        x = (Math.random()-0.5)*(ARENA_W-160);
-        y = (Math.random()-0.5)*(ARENA_H-160);
-        tries++;
-        if (Math.hypot(x,y) < 260) continue;
-        ok = true;
-        for (var j=0;j<list.length;j++){
-          var o = list[j];
-          if (Math.abs(x-o.x) < (def.w+o.w)*0.6 && Math.abs(y-o.y) < (def.h+o.h)*0.6){ ok=false; break; }
-        }
-      }
-      if (ok) list.push({type:type, x:x, y:y, w:def.w, h:def.h, rot:(Math.random()-0.5)*0.5, seed:Math.random()*9});
+// ---------- Neighborhood layout ----------
+// Rows tile along Y in repeating cycles: STREET / lot-row (front yard facing
+// the street, house, back yard) / ALLEY / lot-row mirrored (back yard facing
+// the alley, house, front yard facing the next street) / STREET again. That
+// mirroring is what makes two rows of houses back up to a shared alley, the
+// way real residential blocks are laid out, instead of every house facing
+// the same direction.
+var STREET_W = 70, ALLEY_W = 50, HOUSE_D = 80, YARD_FRONT_D = 45, YARD_BACK_D = 32;
+var ROW_H = YARD_FRONT_D + HOUSE_D + YARD_BACK_D;
+var ROW_CYCLE = STREET_W + ROW_H + ALLEY_W + ROW_H;
+var LOT_W = 550, HOUSE_W = 220, DRIVE_W = 60;
+var COL_STREET = '#6f7066', COL_ALLEY = '#867a5e', COL_YARD = '#7c9156', COL_YARD2 = '#86965c', COL_DRIVE = '#9b988c';
+
+function layoutLotRow(rowTop, mirrored, ground, houses, rowSeed){
+  var halfW = ARENA_W/2;
+  var n = Math.ceil(ARENA_W/LOT_W);
+  var startX = -halfW;
+  for (var i=0;i<n;i++){
+    var lotX = startX + i*LOT_W;
+    var driveSide = i%2;
+    var yardColor = (i%3===0) ? COL_YARD2 : COL_YARD;
+    var driveX = lotX + (driveSide ? LOT_W-DRIVE_W : 0);
+    if (!mirrored){
+      ground.push({x:lotX, y:rowTop, w:LOT_W, h:YARD_FRONT_D, color:yardColor});
+      ground.push({x:driveX, y:rowTop, w:DRIVE_W, h:YARD_FRONT_D, color:COL_DRIVE});
+      houses.push({x:lotX+LOT_W/2, y:rowTop+YARD_FRONT_D+HOUSE_D/2, w:HOUSE_W, h:HOUSE_D, seed:rowSeed+i*1.37});
+      ground.push({x:lotX, y:rowTop+YARD_FRONT_D+HOUSE_D, w:LOT_W, h:YARD_BACK_D, color:yardColor});
+    } else {
+      ground.push({x:lotX, y:rowTop, w:LOT_W, h:YARD_BACK_D, color:yardColor});
+      houses.push({x:lotX+LOT_W/2, y:rowTop+YARD_BACK_D+HOUSE_D/2, w:HOUSE_W, h:HOUSE_D, seed:rowSeed+i*1.37});
+      ground.push({x:lotX, y:rowTop+YARD_BACK_D+HOUSE_D, w:LOT_W, h:YARD_FRONT_D, color:yardColor});
+      ground.push({x:driveX, y:rowTop+YARD_BACK_D+HOUSE_D, w:DRIVE_W, h:YARD_FRONT_D, color:COL_DRIVE});
     }
   }
+}
+
+function tilesOfColor(ground, color){
+  var list = [];
+  for (var i=0;i<ground.length;i++) if (ground[i].color===color) list.push(ground[i]);
   return list;
+}
+function sampleN(arr, n){
+  var copy = arr.slice(), out = [];
+  for (var i=0;i<n && copy.length;i++){
+    var j = Math.floor(Math.random()*copy.length);
+    out.push(copy[j]); copy.splice(j,1);
+  }
+  return out;
+}
+function placeInTile(tile, marginX, marginY){
+  return {
+    x: tile.x+marginX+Math.random()*Math.max(1,tile.w-marginX*2),
+    y: tile.y+marginY+Math.random()*Math.max(1,tile.h-marginY*2)
+  };
+}
+
+function generateNeighborhood(){
+  var ground = [];
+  var houseSlots = [];
+  var halfH = ARENA_H/2, halfW = ARENA_W/2;
+  var rowSeed = 0;
+  for (var cy=-halfH; cy<halfH; cy+=ROW_CYCLE){
+    ground.push({x:-halfW, y:cy, w:ARENA_W, h:STREET_W, color:COL_STREET});
+    var row1Y = cy+STREET_W;
+    layoutLotRow(row1Y, false, ground, houseSlots, rowSeed++);
+    var alleyY = row1Y+ROW_H;
+    ground.push({x:-halfW, y:alleyY, w:ARENA_W, h:ALLEY_W, color:COL_ALLEY});
+    layoutLotRow(alleyY+ALLEY_W, true, ground, houseSlots, rowSeed++);
+  }
+
+  var obstacleList = [];
+  for (var hi=0; hi<houseSlots.length; hi++){
+    var h = houseSlots[hi];
+    if (Math.hypot(h.x,h.y) > 230) // leave a clearing around the player's spawn
+      obstacleList.push({type:'house', x:h.x, y:h.y, w:h.w, h:h.h, rot:0, seed:h.seed});
+  }
+
+  // Contextual clutter sampled from the ground tiles themselves, so it reads
+  // as things that belong on a street/alley/yard (parked cars on the road,
+  // dumpsters in the alley) rather than scattered randomly over the houses.
+  var streets = tilesOfColor(ground, COL_STREET);
+  var alleys = tilesOfColor(ground, COL_ALLEY);
+  var yards = tilesOfColor(ground, COL_YARD).concat(tilesOfColor(ground, COL_YARD2));
+  streets.forEach(function(t){
+    for (var i=0;i<2;i++){
+      var p = placeInTile(t, 90, 18);
+      if (Math.hypot(p.x,p.y) < 260) continue;
+      obstacleList.push({type:'car', x:p.x, y:p.y, w:OBSTACLE_DEFS.car.w, h:OBSTACLE_DEFS.car.h, rot:(Math.random()-0.5)*0.3, seed:Math.random()*9});
+    }
+  });
+  alleys.forEach(function(t){
+    for (var i=0;i<2;i++){
+      var p = placeInTile(t, 25, 13);
+      if (Math.hypot(p.x,p.y) < 260) continue;
+      var type = Math.random()<0.6 ? 'dumpster' : 'trash';
+      var d = OBSTACLE_DEFS[type];
+      obstacleList.push({type:type, x:p.x, y:p.y, w:d.w, h:d.h, rot:(Math.random()-0.5)*0.4, seed:Math.random()*9});
+    }
+  });
+  sampleN(yards, 16).forEach(function(t){
+    var p = placeInTile(t, 12, 10);
+    if (Math.hypot(p.x,p.y) < 260) return;
+    var type = Math.random()<0.5 ? 'crate' : 'trash';
+    var d = OBSTACLE_DEFS[type];
+    obstacleList.push({type:type, x:p.x, y:p.y, w:d.w, h:d.h, rot:(Math.random()-0.5)*0.5, seed:Math.random()*9});
+  });
+
+  return {ground:ground, obstacles:obstacleList};
 }
 
 // Push a circular entity out of any rectangular obstacle it overlaps.
@@ -425,7 +527,9 @@ function resetGame(){
   };
   bullets = []; zombies = []; particles = []; pickups = []; floaters = [];
   decals = []; embers = [];
-  obstacles = generateObstacles();
+  var neighborhood = generateNeighborhood();
+  groundTiles = neighborhood.ground;
+  obstacles = neighborhood.obstacles;
   wave = 0; waveBanner=''; waveBannerTime=0; betweenWaves=true; betweenTimer=1.2;
   killsThisWave=0; totalKills=0; spawnQueue=0; spawnTimer=0;
   camX=0; camY=0; shake=0;
@@ -503,14 +607,14 @@ function zombieTypeForWave(){
 }
 
 var ZTYPES = {
-  walker:{hp:30, speed:70, r:22, dmg:8, color:'#39ff8a', glow:'#0fff7a', score:10,
-    skin:'#1d6b3d', skinHi:'#39ff8a', eye:'#c6ffe0', blood:'#0c3a1e'},
-  runner:{hp:18, speed:150, r:17, dmg:6, color:'#ff7a39', glow:'#ff5500', score:15,
-    skin:'#8a2f12', skinHi:'#ff7a39', eye:'#ffd9b0', blood:'#4a1606'},
-  brute:{hp:120, speed:48, r:34, dmg:18, color:'#b53bff', glow:'#9000ff', score:30,
-    skin:'#4a1170', skinHi:'#b53bff', eye:'#ecd0ff', blood:'#2b0a44'},
-  boss:{hp:900, speed:40, r:62, dmg:30, color:'#ff2050', glow:'#ff0040', score:300,
-    skin:'#5c0018', skinHi:'#ff2050', eye:'#ffd0de', blood:'#400012'}
+  walker:{hp:30, speed:70, r:22, dmg:8, color:'#7c8a4a', glow:'#4d5a2c', score:10,
+    skin:'#4a5638', skinHi:'#6e7d4a', eye:'#cfc89a', blood:'#5c1410'},
+  runner:{hp:18, speed:150, r:17, dmg:6, color:'#8a5a3a', glow:'#5c3a22', score:15,
+    skin:'#6b3a22', skinHi:'#8a5238', eye:'#d8b888', blood:'#460e08'},
+  brute:{hp:120, speed:48, r:34, dmg:18, color:'#5e5c48', glow:'#3a3a2a', score:30,
+    skin:'#3e3a2e', skinHi:'#5c5840', eye:'#c2c096', blood:'#3a1208'},
+  boss:{hp:900, speed:40, r:62, dmg:30, color:'#7a1a20', glow:'#4a0e14', score:300,
+    skin:'#4a1014', skinHi:'#7a2026', eye:'#d89898', blood:'#380608'}
 };
 
 // Each weapon pickup counters a specific zombie threat:
@@ -876,7 +980,7 @@ function drawZombie(zz, sx, sy){
   ctx.save();
   ctx.translate(sx,sy);
   ctx.rotate(zz.angle||0);
-  ctx.shadowColor = hi; ctx.shadowBlur = 13;
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 5;
 
   // legs, dragging/shambling
   ctx.strokeStyle = skin; ctx.lineWidth = 6*scale; ctx.lineCap='round';
@@ -889,13 +993,18 @@ function drawZombie(zz, sx, sy){
   ctx.lineTo(-13*scale + legSwing*7*scale, -13*scale - Math.abs(legSwing)*4*scale);
   ctx.stroke();
 
-  // torso
+  // torso, mottled rotting flesh with a dried-blood underside
   var tg = ctx.createRadialGradient(2*scale,0,2*scale, 0,0,13*scale);
   tg.addColorStop(0, hi); tg.addColorStop(1, skin);
   ctx.fillStyle = tg;
   ctx.beginPath();
   ctx.ellipse(0,0, 11*scale, 8.5*scale, 0, 0, Math.PI*2);
   ctx.fill();
+  if (!flashed){
+    ctx.fillStyle = zz.blood; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.ellipse(-2*scale, 3*scale, 6*scale, 4*scale, 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 
   // arms reaching toward target
   ctx.strokeStyle = skin; ctx.lineWidth = 4.5*scale;
@@ -912,8 +1021,8 @@ function drawZombie(zz, sx, sy){
   ctx.fillStyle = hi;
   ctx.beginPath(); ctx.arc(8*scale, 0, 6.5*scale, 0, Math.PI*2); ctx.fill();
 
-  // glowing eyes
-  ctx.shadowBlur = 9; ctx.shadowColor = eye; ctx.fillStyle = eye;
+  // sunken, sickly eyes -- dim, not glowing
+  ctx.shadowBlur = flashed?6:0; ctx.shadowColor = eye; ctx.fillStyle = eye;
   ctx.beginPath(); ctx.arc(10.5*scale, -2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(10.5*scale, 2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
 
@@ -930,12 +1039,12 @@ function drawBoss(zz, sx, sy){
   ctx.rotate(zz.angle||0);
 
   ctx.save();
-  ctx.globalAlpha = 0.35;
-  ctx.strokeStyle = hi; ctx.shadowColor = hi; ctx.shadowBlur = 30; ctx.lineWidth = 4;
+  ctx.globalAlpha = 0.25;
+  ctx.strokeStyle = hi; ctx.shadowColor = hi; ctx.shadowBlur = 14; ctx.lineWidth = 4;
   ctx.beginPath(); ctx.arc(0,0, zz.r*1.5*pulse, 0, Math.PI*2); ctx.stroke();
   ctx.restore();
 
-  ctx.shadowColor = hi; ctx.shadowBlur = 22;
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 9;
   ctx.fillStyle = skin;
   for (var i=0;i<8;i++){
     var a = i/8*Math.PI*2 + zz.anim*0.3;
@@ -953,7 +1062,7 @@ function drawBoss(zz, sx, sy){
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.arc(0,0, zz.r*0.85, 0, Math.PI*2); ctx.fill();
 
-  ctx.shadowBlur = 18; ctx.shadowColor = eye; ctx.fillStyle = eye;
+  ctx.shadowBlur = 7; ctx.shadowColor = eye; ctx.fillStyle = eye;
   ctx.beginPath(); ctx.arc(zz.r*0.15,0, zz.r*0.22*pulse, 0, Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(zz.r*0.55,-zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
   ctx.beginPath(); ctx.arc(zz.r*0.55, zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
@@ -1002,44 +1111,55 @@ function drawObstacle(o, sx, sy){
       var a = o.seed+i*1.7;
       ctx.beginPath(); ctx.ellipse(Math.cos(a)*6,Math.sin(a)*5,7,4,a,0,Math.PI*2); ctx.fill();
     }
+  } else if (o.type==='house'){
+    var roofHues = ['#7a5a42','#6e6450','#80584a','#6a5e3a'];
+    var roofColor = roofHues[Math.floor(o.seed)%roofHues.length];
+    ctx.fillStyle = roofColor;
+    ctx.fillRect(-o.w/2,-o.h/2,o.w,o.h);
+    ctx.strokeStyle = '#2c241a'; ctx.lineWidth=3;
+    ctx.strokeRect(-o.w/2,-o.h/2,o.w,o.h);
+    // roof ridge
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(-o.w/2,0); ctx.lineTo(o.w/2,0); ctx.stroke();
+    // collapsed/charred patch for the abandoned look
+    ctx.fillStyle = 'rgba(20,16,12,0.4)';
+    ctx.beginPath(); ctx.ellipse(o.w*0.22,o.h*0.15,o.w*0.16,o.h*0.22,0.2,0,Math.PI*2); ctx.fill();
+    // chimney
+    ctx.fillStyle = '#5a4a3e';
+    ctx.fillRect(-o.w*0.32,-o.h/2-7,14,9);
   }
   ctx.restore();
 }
 
 function draw(){
   ctx.clearRect(0,0,W,H);
-  ctx.fillStyle = '#0a0907';
+  ctx.fillStyle = '#8b9476';
   ctx.fillRect(0,0,W,H);
 
   var sx = (Math.random()-0.5)*shake, sy=(Math.random()-0.5)*shake;
   ctx.save();
   ctx.translate(sx,sy);
 
-  // cracked pavement grid
-  ctx.save();
-  ctx.strokeStyle = 'rgba(150,140,120,0.07)';
-  ctx.lineWidth = 1;
-  var offX = ((camX % GRID)+GRID)%GRID;
-  var offY = ((camY % GRID)+GRID)%GRID;
-  for (var gx=-offX; gx<W; gx+=GRID){
-    ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke();
+  // neighborhood ground (streets, alleys, yards, driveways)
+  for (var gt=0; gt<groundTiles.length; gt++){
+    var tile = groundTiles[gt];
+    var ts = worldToScreen(tile.x,tile.y);
+    if (!isOnScreen(ts[0]+tile.w/2,ts[1]+tile.h/2,Math.max(tile.w,tile.h)/2+40)) continue;
+    ctx.fillStyle = tile.color;
+    ctx.fillRect(ts[0],ts[1],tile.w,tile.h);
   }
-  for (var gy=-offY; gy<H; gy+=GRID){
-    ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
-  }
-  ctx.restore();
 
-  // alley boundary wall (brick, rectangular city block)
+  // concrete perimeter barrier around the block
   var bl = worldToScreen(-ARENA_W/2,-ARENA_H/2);
   ctx.save();
-  ctx.strokeStyle = '#5a4636';
-  ctx.shadowColor = '#000';
-  ctx.shadowBlur = 12;
+  ctx.strokeStyle = '#9a9a8c';
+  ctx.shadowColor = 'rgba(0,0,0,0.3)';
+  ctx.shadowBlur = 6;
   ctx.lineWidth = 10;
   ctx.globalAlpha = 0.9;
   ctx.strokeRect(bl[0],bl[1],ARENA_W,ARENA_H);
-  ctx.globalAlpha = 0.35;
-  ctx.strokeStyle = '#2a1f15'; ctx.lineWidth = 3;
+  ctx.globalAlpha = 0.3;
+  ctx.strokeStyle = '#6e6e60'; ctx.lineWidth = 3;
   for (var bw=20; bw<Math.max(ARENA_W,ARENA_H); bw+=26){
     ctx.beginPath(); ctx.moveTo(bl[0],bl[1]+ (bw % ARENA_H)); ctx.lineTo(bl[0]+ARENA_W,bl[1]+(bw % ARENA_H)); ctx.stroke();
   }
@@ -1061,14 +1181,6 @@ function draw(){
     var ea = (e.life/e.maxLife);
     drawGlowCircle(s[0],s[1],e.size,'#9a9286','#6b6458',ea*0.4);
   }
-
-  // dim sodium-lamp pool around the player
-  var psx = worldToScreen(player.x,player.y);
-  var spot = ctx.createRadialGradient(psx[0],psx[1],0,psx[0],psx[1],230);
-  spot.addColorStop(0,'rgba(255,180,90,0.08)');
-  spot.addColorStop(1,'rgba(255,180,90,0)');
-  ctx.fillStyle = spot;
-  ctx.beginPath(); ctx.arc(psx[0],psx[1],230,0,Math.PI*2); ctx.fill();
 
   // blood decals on the floor
   for (var dc=0; dc<decals.length; dc++){
@@ -1153,9 +1265,9 @@ function draw(){
     var moving = (Math.sqrt(stickL.dx*stickL.dx+stickL.dy*stickL.dy) > 0.12);
     var legSwing = moving ? Math.sin(player.walkPhase)*0.6 : 0;
 
-    // legs
-    ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
-    ctx.strokeStyle = '#2b261d'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    // legs, olive fatigues
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+    ctx.strokeStyle = '#3a3f2a'; ctx.lineWidth = 6; ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(-4,4); ctx.lineTo(-15 - legSwing*8, 11 + Math.abs(legSwing)*4);
     ctx.stroke();
@@ -1163,34 +1275,49 @@ function draw(){
     ctx.moveTo(-4,-4); ctx.lineTo(-15 + legSwing*8, -11 - Math.abs(legSwing)*4);
     ctx.stroke();
 
-    // survivor jacket / torso
-    ctx.shadowBlur = 10; ctx.shadowColor = '#000';
+    // rifle stock, slung back behind the shoulder
+    ctx.shadowBlur = 3; ctx.shadowColor = '#000';
+    ctx.fillStyle = '#221f18';
+    ctx.fillRect(-12,-2,10,4);
+
+    // tactical vest / torso, olive-drab with chest rig pouches
+    ctx.shadowBlur = 8; ctx.shadowColor = '#000';
     var tgrad = ctx.createLinearGradient(-10,0,16,0);
-    tgrad.addColorStop(0,'#3a3326'); tgrad.addColorStop(1,'#7a6b4a');
+    tgrad.addColorStop(0,'#3c4530'); tgrad.addColorStop(1,'#6b7a4a');
     ctx.fillStyle = tgrad;
     ctx.beginPath();
     ctx.moveTo(15,0); ctx.lineTo(3,10); ctx.lineTo(-11,6); ctx.lineTo(-11,-6); ctx.lineTo(3,-10);
     ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = '#1c1810'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.strokeStyle = '#1c1f14'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.fillStyle = '#23271a';
+    ctx.fillRect(0,-7,5,4); ctx.fillRect(0,3,5,4);
 
-    // head / gas-mask goggles
-    ctx.fillStyle = '#23201a';
-    ctx.beginPath(); ctx.arc(10,0,6,0,Math.PI*2); ctx.fill();
-    ctx.shadowColor = '#ff5a3c'; ctx.shadowBlur = 10;
-    ctx.fillStyle = '#ff5a3c';
-    ctx.beginPath(); ctx.ellipse(11.5,0,3.4,2.2,0,0,Math.PI*2); ctx.fill();
+    // helmet
+    ctx.shadowBlur = 5;
+    ctx.fillStyle = '#3a3a30';
+    ctx.beginPath(); ctx.arc(10,0,6.2,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#1c1c16'; ctx.lineWidth = 1; ctx.stroke();
+    // ballistic goggles, no glow -- tactical, not gas-mask
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#15140f';
+    ctx.beginPath(); ctx.ellipse(12,0,3.2,2.1,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(150,165,150,0.55)';
+    ctx.beginPath(); ctx.ellipse(12.8,-0.6,1,0.6,0.3,0,Math.PI*2); ctx.fill();
 
-    // gun barrel
+    // rifle: barrel + foregrip + magazine
     ctx.shadowBlur = 4; ctx.shadowColor='#000';
     ctx.fillStyle = '#1a1814';
-    ctx.fillRect(14,-2,15,4);
+    ctx.fillRect(13,-1.6,23,3.2);
+    ctx.fillRect(20,-3,4,2);
+    ctx.fillStyle = '#221f18';
+    ctx.fillRect(17,1.6,4,7);
 
     // muzzle flash
     if (player.muzzleFlash>0){
       ctx.save();
       ctx.globalAlpha = Math.min(1, player.muzzleFlash/0.06);
       ctx.fillStyle = '#fff7cf'; ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 26;
-      ctx.beginPath(); ctx.moveTo(29,0); ctx.lineTo(42,-6); ctx.lineTo(42,6); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(36,0); ctx.lineTo(50,-6); ctx.lineTo(50,6); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
 
@@ -1225,7 +1352,7 @@ function draw(){
   // vignette
   var grad = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.35,W/2,H/2,Math.max(W,H)*0.75);
   grad.addColorStop(0,'rgba(0,0,0,0)');
-  grad.addColorStop(1,'rgba(0,0,0,0.65)');
+  grad.addColorStop(1,'rgba(0,0,0,0.16)');
   ctx.fillStyle = grad;
   ctx.fillRect(0,0,W,H);
 
