@@ -144,8 +144,8 @@ var SFX = {
 // (matched by identifier) lifts. Every event reconciles against e.touches
 // (the authoritative "what's still down" list) so a flaky touchend/
 // touchcancel on one finger can never drop or freeze the other stick.
-var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
-var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
+var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
+var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
 var STICK_R_MAX = 85;
 var STICK_DEADZONE = 0.12;
 
@@ -154,8 +154,16 @@ function updateStickAnchors(){
   var anchorY = H - Math.min(140, H*0.26);
   stickL.anchorX = marginX; stickL.anchorY = anchorY;
   stickR.anchorX = W - marginX; stickR.anchorY = anchorY;
-  if (!stickL.active){ stickL.baseX=stickL.anchorX; stickL.baseY=stickL.anchorY; stickL.x=stickL.anchorX; stickL.y=stickL.anchorY; }
-  if (!stickR.active){ stickR.baseX=stickR.anchorX; stickR.baseY=stickR.anchorY; stickR.x=stickR.anchorX; stickR.y=stickR.anchorY; }
+  // The anchor IS the pivot, always -- if the mobile browser's address bar
+  // hides/shows mid-drag and shifts the visual viewport, the base must move
+  // with it or the ring and knob desync (ring jumps to the new anchor while
+  // the knob stays pinned to stale math, looking like the stick "vanished").
+  stickL.baseX = stickL.anchorX; stickL.baseY = stickL.anchorY;
+  stickR.baseX = stickR.anchorX; stickR.baseY = stickR.anchorY;
+  if (!stickL.active){ stickL.x=stickL.anchorX; stickL.y=stickL.anchorY; }
+  else if (stickL.lastClientX != null) stickMoveTo(stickL, {clientX:stickL.lastClientX, clientY:stickL.lastClientY});
+  if (!stickR.active){ stickR.x=stickR.anchorX; stickR.y=stickR.anchorY; }
+  else if (stickR.lastClientX != null) stickMoveTo(stickR, {clientX:stickR.lastClientX, clientY:stickR.lastClientY});
 }
 
 function findTouchById(touchList, id){
@@ -172,8 +180,10 @@ function stickRelease(s){
   s.active=false; s.id=null; s.dx=0; s.dy=0;
   s.baseX = s.anchorX; s.baseY = s.anchorY;
   s.x = s.anchorX; s.y = s.anchorY;
+  s.lastClientX = null; s.lastClientY = null;
 }
 function stickMoveTo(s, t){
+  s.lastClientX = t.clientX; s.lastClientY = t.clientY;
   var dx = t.clientX - s.baseX, dy = t.clientY - s.baseY;
   var d = Math.sqrt(dx*dx+dy*dy);
   if (d > STICK_R_MAX){ dx = dx/d*STICK_R_MAX; dy = dy/d*STICK_R_MAX; d = STICK_R_MAX; }
