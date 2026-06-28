@@ -39,6 +39,7 @@
 
 var canvas = document.getElementById('c');
 var ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
 var orientEl = document.getElementById('orient');
 var DPR = Math.min(window.devicePixelRatio || 1, 2.5);
 var W=0, H=0;
@@ -53,6 +54,7 @@ function resize(){
   canvas.style.width = W+'px';
   canvas.style.height = H+'px';
   ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.imageSmoothingEnabled = false; // resizing the canvas resets this to the browser default
   if (H>W && !orientDismissed) orientEl.classList.add('show'); else orientEl.classList.remove('show');
   updateStickAnchors();
 }
@@ -492,6 +494,13 @@ function generateNeighborhood(){
     obstacleList.push({type:type, x:p.x, y:p.y, w:d.w, h:d.h, rot:(Math.random()-0.5)*0.5, seed:Math.random()*9});
   });
 
+  for (var ti=0; ti<ground.length; ti++) bakeTileTexture(ground[ti], ti*31+7);
+  for (var oi=0; oi<obstacleList.length; oi++){
+    var bo = obstacleList[oi];
+    if (bo.type==='house') bakeHouseTexture(bo);
+    else if (bo.type==='car') bakeCarTexture(bo);
+  }
+
   return {ground:ground, obstacles:obstacleList};
 }
 
@@ -632,6 +641,284 @@ var PICKUP_DEFS = {
   magnum:  {color:'#ff5a3c', sym:'M',  label:'MAGNUM'},
   nuke:    {color:'#b53bff', sym:'N',  label:'NUKE!'}
 };
+
+// ---------- Pixel-art sprite system ----------
+// Hand-placed pixel grids baked once into small offscreen canvases, then
+// scaled up every frame with ctx.drawImage (imageSmoothingEnabled=false
+// keeps the edges crisp instead of blurring). Hand-placed pixels read far
+// better at this resolution than shrunk/antialiased vector art.
+function pxCanvas(w,h){
+  var c = document.createElement('canvas'); c.width=w; c.height=h;
+  return c;
+}
+function pxGrid(w,h){
+  var g = []; for (var y=0;y<h;y++) g.push(new Array(w).fill(null));
+  return g;
+}
+function pxSet(g,x,y,c){ if (y>=0&&y<g.length&&x>=0&&x<g[0].length) g[y][x]=c; }
+function pxSpan(g,y,x0,x1,c){ for (var x=x0;x<=x1;x++) pxSet(g,x,y,c); }
+function pxDot(g,pts,c){ for (var i=0;i<pts.length;i++) pxSet(g,pts[i][0],pts[i][1],c); }
+// Outlines any empty cell that touches a filled cell, so adjacent regions of
+// similar color still read as separate shapes instead of blending together.
+function pxOutline(g, outlineColor){
+  var h=g.length, w=g[0].length;
+  var adds = [];
+  for (var y=0;y<h;y++) for (var x=0;x<w;x++){
+    if (g[y][x]) continue;
+    var touches = (x>0&&g[y][x-1]) || (x<w-1&&g[y][x+1]) || (y>0&&g[y-1][x]) || (y<h-1&&g[y+1][x]);
+    if (touches) adds.push([x,y]);
+  }
+  for (var i=0;i<adds.length;i++) g[adds[i][1]][adds[i][0]] = outlineColor;
+}
+function pxRender(g){
+  var w=g[0].length, h=g.length;
+  var c = pxCanvas(w,h);
+  var pctx = c.getContext('2d');
+  for (var y=0;y<h;y++) for (var x=0;x<w;x++){
+    var col = g[y][x];
+    if (col){ pctx.fillStyle = col; pctx.fillRect(x,y,1,1); }
+  }
+  return c;
+}
+function shadeColor(hex, amt){
+  var n = parseInt(hex.slice(1),16);
+  var r = Math.max(0,Math.min(255,(n>>16)+amt));
+  var gg = Math.max(0,Math.min(255,((n>>8)&255)+amt));
+  var b = Math.max(0,Math.min(255,(n&255)+amt));
+  return '#'+((1<<24)+(r<<16)+(gg<<8)+b).toString(16).slice(1);
+}
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- Player sprite (hand pixel-art, facing +x) ----------
+var PW = 26, PH = 18;
+function buildPlayerFrame(swing){
+  var g = pxGrid(PW, PH);
+  var V='#3c4530', W='#5d6b42', P='#1c1f15', H='#33332a', Hh='#48483a',
+      gg='#15140f', s='#9fb09a', Lc='#5a4a32', Lh='#6e5b3e', b='#1c1812',
+      m='#2c2820', Gd='#191712';
+
+  if (swing>0){
+    pxSpan(g,10,5,6,Lc); pxSpan(g,11,4,6,Lc); pxSpan(g,12,3,5,Lc); pxSpan(g,13,2,4,b);
+    pxSpan(g,9,5,6,Lh); pxSpan(g,8,4,6,Lh); pxSpan(g,7,3,5,Lh); pxSpan(g,6,2,4,b);
+  } else {
+    pxSpan(g,10,5,6,Lh); pxSpan(g,9,4,6,Lh); pxSpan(g,8,3,5,Lh); pxSpan(g,7,2,4,b);
+    pxSpan(g,9,5,6,Lc); pxSpan(g,10,4,6,Lc); pxSpan(g,11,3,5,Lc); pxSpan(g,12,2,4,b);
+  }
+
+  pxSpan(g,5,6,12,V); pxSpan(g,5,9,11,W);
+  pxSpan(g,6,5,13,V); pxSpan(g,6,9,12,W);
+  pxSpan(g,7,4,14,V);
+  pxSpan(g,8,4,15,V);
+  pxSpan(g,9,4,14,V);
+  pxSpan(g,10,4,13,V);
+  pxSpan(g,11,5,12,V);
+  pxSpan(g,12,6,11,V);
+  pxSpan(g,6,8,9,P); pxSpan(g,7,8,9,P);
+  pxSpan(g,9,8,9,P); pxSpan(g,10,8,9,P);
+
+  pxSpan(g,5,15,16,Hh);
+  pxSpan(g,6,14,18,H);
+  pxSpan(g,7,13,19,H);
+  pxSpan(g,8,13,19,H);
+  pxSpan(g,9,13,19,H);
+  pxSpan(g,10,14,18,H);
+  pxSpan(g,11,15,16,Hh);
+  pxSpan(g,7,17,18,gg); pxSpan(g,8,17,18,gg); pxSpan(g,9,17,18,gg);
+  pxSet(g,18,7,s);
+
+  pxSpan(g,7,20,25,m);
+  pxSpan(g,8,20,25,Gd);
+  pxSpan(g,9,23,24,Gd);
+  pxSpan(g,10,23,24,Gd);
+
+  pxSpan(g,6,13,14,gg);
+  pxSpan(g,7,12,13,gg);
+  pxSpan(g,8,12,13,gg);
+  pxSpan(g,9,12,13,gg);
+  pxSpan(g,10,13,14,gg);
+
+  pxOutline(g, '#0c0d08');
+  return pxRender(g);
+}
+var PLAYER_SPRITES = [buildPlayerFrame(1), buildPlayerFrame(-1)];
+var PLAYER_PIX_SCALE = 2.2;
+var PLAYER_ANCHOR_X = PW/2, PLAYER_ANCHOR_Y = PH/2;
+
+// ---------- Zombie sprites (hand pixel-art, per-type palette) ----------
+// Built in the mockup's "front view" coordinate frame (head toward low y,
+// legs toward high y, arms spread along x), then zSet/zSpan/zDot rotate
+// that 90 degrees on the fly so the rendered sprite faces +x -- matching
+// zz.angle, which is computed as atan2(dy,dx) elsewhere in this file.
+var ZSZ = 20;
+function zPalette(P){
+  return {
+    Z: P.skin, c: shadeColor(P.skin,-35), d: P.blood,
+    D: shadeColor(P.blood,45), e: P.eye, j: '#1a0c08',
+    b: shadeColor(P.skin,-70), k2: '#0c0a06', t: '#d8d2ad'
+  };
+}
+function buildZombieFrame(typeKey, phase){
+  var pal = zPalette(ZTYPES[typeKey]);
+  var Z=pal.Z, c=pal.c, d=pal.d, D=pal.D, e=pal.e, j=pal.j, b=pal.b, k2=pal.k2, t=pal.t;
+  var g = pxGrid(ZSZ, ZSZ);
+  function zSet(x,y,col){ pxSet(g, (ZSZ-1)-y, x, col); }
+  function zSpan(y,x0,x1,col){ for (var x=x0;x<=x1;x++) zSet(x,y,col); }
+  function zDot(pts,col){ for (var i=0;i<pts.length;i++) zSet(pts[i][0],pts[i][1],col); }
+
+  // head -- hollow bloodshot eyes, gruesome open maw
+  zSpan(3,9,10,Z); zSpan(4,8,11,Z);
+  zSpan(5,7,12,Z);
+  zSet(7,5,k2); zSet(8,5,e);
+  zSet(11,5,e); zSet(12,5,k2);
+  zSpan(6,8,11,Z); zSet(9,6,j); zSet(10,6,j);
+  zSpan(7,8,11,j);
+  zSet(9,7,t); zSet(11,7,d);
+
+  // torso, with a dried-blood underside
+  zSpan(8,7,12,Z);
+  zSpan(9,6,13,Z); zSpan(9,6,8,c);
+  zSpan(10,5,14,Z); zSpan(10,5,7,c); zSpan(10,12,13,d);
+  zSpan(11,5,14,Z); zSpan(11,5,6,c); zSpan(11,11,13,d); zSet(12,11,D);
+  zSpan(12,5,14,Z); zSpan(12,11,13,d);
+  zSpan(13,6,13,Z); zSpan(13,11,12,d);
+  zSpan(14,7,12,Z);
+  zSpan(15,8,11,Z);
+
+  // arms, drooping & asymmetric stagger
+  if (phase>0){
+    zDot([[6,9],[5,10],[4,11],[3,12],[3,13]], Z); zSet(4,11,c);
+    zDot([[13,9],[14,10],[15,11],[16,12]], Z); zSet(15,11,c);
+  } else {
+    zDot([[6,9],[5,10],[4,11],[4,12]], Z); zSet(5,10,c);
+    zDot([[13,9],[14,10],[15,11],[16,12],[16,13]], Z); zSet(14,10,c);
+  }
+
+  // stub legs, stagger offset
+  if (phase>0){
+    zSpan(16,8,9,b); zSpan(17,8,9,b);
+    zSpan(15,11,12,b); zSpan(16,11,12,b);
+  } else {
+    zSpan(15,8,9,b); zSpan(16,8,9,b);
+    zSpan(16,11,12,b); zSpan(17,11,12,b);
+  }
+
+  if (typeKey==='brute'){
+    zSpan(7,5,14,Z); zSpan(6,7,12,Z);
+    zDot([[2,13],[2,14],[17,13],[17,14]], Z);
+  } else if (typeKey==='runner'){
+    zSpan(9,7,8,c); zSpan(9,11,12,c);
+  } else if (typeKey==='boss'){
+    var rnd = mulberry32(phase>0?701:907);
+    for (var i=0;i<5;i++){
+      var bx = 6+Math.floor(rnd()*9), by = 8+Math.floor(rnd()*7);
+      zSet(bx,by,D);
+    }
+    zSpan(2,8,11,D);
+  }
+
+  pxOutline(g, '#0c0d08');
+  return pxRender(g);
+}
+var ZOMBIE_SPRITES = {
+  walker: [buildZombieFrame('walker',1), buildZombieFrame('walker',-1)],
+  runner: [buildZombieFrame('runner',1), buildZombieFrame('runner',-1)],
+  brute:  [buildZombieFrame('brute',1),  buildZombieFrame('brute',-1)],
+  boss:   [buildZombieFrame('boss',1),   buildZombieFrame('boss',-1)]
+};
+var ZOMBIE_PIX_SCALE = 2.0;
+var ZOMBIE_ANCHOR = ZSZ/2;
+
+// ---------- Ground/obstacle texture baking ----------
+// One unique canvas is baked per ground-tile/house/car INSTANCE (not a
+// shared repeating ctx.createPattern) so the texture's pixels stay locked
+// to the tile's own screen rect as the camera scrolls; a canvas pattern is
+// anchored to canvas pixel space and would visibly swim out of sync.
+function bakeTileTexture(tile, seed){
+  var w = Math.max(1,Math.round(tile.w)), h = Math.max(1,Math.round(tile.h));
+  var c = pxCanvas(w,h);
+  var g = c.getContext('2d');
+  g.fillStyle = tile.color; g.fillRect(0,0,w,h);
+  var dark = shadeColor(tile.color,-28), light = shadeColor(tile.color,26);
+  var rnd = mulberry32(seed);
+  var n = Math.min(Math.floor(w*h*0.14), 12000);
+  for (var i=0;i<n;i++){
+    var x = Math.floor(rnd()*w), y = Math.floor(rnd()*h);
+    g.fillStyle = rnd()<0.55 ? dark : light;
+    g.globalAlpha = 0.3 + rnd()*0.35;
+    g.fillRect(x,y,1,1);
+  }
+  g.globalAlpha = 1;
+  tile.tex = c;
+}
+function bakeHouseTexture(o){
+  var w = Math.round(o.w), h = Math.round(o.h);
+  var c = pxCanvas(w,h);
+  var g = c.getContext('2d');
+  var roofHues = ['#7a5a42','#6e6450','#80584a','#6a5e3a'];
+  var roofColor = roofHues[Math.floor(o.seed)%roofHues.length];
+  var dark = shadeColor(roofColor,-30), light = shadeColor(roofColor,22);
+  g.fillStyle = roofColor; g.fillRect(0,0,w,h);
+  var rnd = mulberry32(Math.floor(o.seed*97)+1);
+  var n = Math.floor(w*h*0.05);
+  for (var i=0;i<n;i++){
+    var x=Math.floor(rnd()*w), y=Math.floor(rnd()*h);
+    g.fillStyle = rnd()<0.5?dark:light;
+    g.globalAlpha=0.25+rnd()*0.3;
+    g.fillRect(x,y,1,1);
+  }
+  g.globalAlpha=1;
+  g.fillStyle = 'rgba(20,24,26,0.55)';
+  g.fillRect(w*0.12,h*0.18,w*0.14,h*0.3);
+  g.fillRect(w*0.74,h*0.18,w*0.14,h*0.3);
+  g.strokeStyle='rgba(0,0,0,0.4)'; g.lineWidth=1;
+  g.strokeRect(w*0.12,h*0.18,w*0.14,h*0.3);
+  g.strokeRect(w*0.74,h*0.18,w*0.14,h*0.3);
+  g.fillStyle = shadeColor(roofColor,-50);
+  g.fillRect(w*0.44,h*0.42,w*0.12,h*0.58);
+  g.fillStyle = 'rgba(20,16,12,0.4)';
+  g.beginPath(); g.ellipse(w*0.72,h*0.65,w*0.16,h*0.22,0.2,0,Math.PI*2); g.fill();
+  g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth=2;
+  g.beginPath(); g.moveTo(0,h/2); g.lineTo(w,h/2); g.stroke();
+  g.strokeStyle = '#2c241a'; g.lineWidth=3;
+  g.strokeRect(1.5,1.5,w-3,h-3);
+  o.tex = c;
+}
+function bakeCarTexture(o){
+  var w = Math.round(o.w), h = Math.round(o.h);
+  var c = pxCanvas(w,h);
+  var g = c.getContext('2d');
+  var bodyHues = ['#3a3530','#2e3a42','#4a2e2e','#33402e','#403a2a'];
+  var bodyColor = bodyHues[Math.floor(o.seed)%bodyHues.length];
+  var dark = shadeColor(bodyColor,-30), light = shadeColor(bodyColor,30);
+  g.translate(w/2,h/2);
+  var grad = g.createLinearGradient(0,-h/2,0,h/2);
+  grad.addColorStop(0, light); grad.addColorStop(1, dark);
+  g.fillStyle = grad;
+  g.beginPath();
+  g.moveTo(-w/2,-h*0.3); g.lineTo(-w*0.3,-h/2); g.lineTo(w*0.25,-h/2);
+  g.lineTo(w/2,-h*0.25); g.lineTo(w/2,h*0.3); g.lineTo(-w/2,h*0.3);
+  g.closePath(); g.fill();
+  g.strokeStyle='#000'; g.lineWidth=2; g.stroke();
+  g.fillStyle='rgba(120,150,140,0.35)';
+  g.fillRect(-w*0.15,-h*0.46,w*0.4,h*0.22);
+  var rnd = mulberry32(Math.floor(o.seed*131)+3);
+  var n2 = Math.floor(w*h*0.05);
+  for (var i=0;i<n2;i++){
+    var x=(rnd()-0.5)*w, y=(rnd()-0.5)*h*0.7;
+    g.fillStyle = rnd()<0.5? 'rgba(90,40,20,0.4)':'rgba(0,0,0,0.25)';
+    g.fillRect(x,y,1,1);
+  }
+  g.fillStyle='#6b1810';
+  g.beginPath(); g.arc(-w*0.42,h*0.34,5,0,Math.PI*2); g.arc(w*0.4,h*0.34,5,0,Math.PI*2); g.fill();
+  o.tex = c;
+}
 
 var MAX_ZOMBIES = 140;
 var zombieUidSeq = 1;
@@ -968,104 +1255,29 @@ function drawGlowCircle(x,y,r,color,glow,alpha){
   ctx.restore();
 }
 
-function drawZombie(zz, sx, sy){
-  var scale = zz.r/22;
-  var legSwing = Math.sin(zz.anim)*0.6;
-  var armSwing = Math.sin(zz.anim+Math.PI)*0.5;
+function drawZombieSprite(zz, sx, sy){
+  var frames = ZOMBIE_SPRITES[zz.type] || ZOMBIE_SPRITES.walker;
+  var frameIdx = Math.sin(zz.anim) > 0 ? 0 : 1;
+  var img = frames[frameIdx];
+  var scale = (zz.r/22) * ZOMBIE_PIX_SCALE;
   var flashed = zz.flash>0;
-  var skin = flashed?'#ffffff':zz.skin;
-  var hi = flashed?'#ffffff':zz.skinHi;
-  var eye = flashed?'#ffffff':zz.eye;
-
-  ctx.save();
-  ctx.translate(sx,sy);
-  ctx.rotate(zz.angle||0);
-  ctx.shadowColor = '#000'; ctx.shadowBlur = 5;
-
-  // legs, dragging/shambling
-  ctx.strokeStyle = skin; ctx.lineWidth = 6*scale; ctx.lineCap='round';
-  ctx.beginPath();
-  ctx.moveTo(-4*scale, 4*scale);
-  ctx.lineTo(-13*scale - legSwing*7*scale, 13*scale + Math.abs(legSwing)*4*scale);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(-4*scale, -4*scale);
-  ctx.lineTo(-13*scale + legSwing*7*scale, -13*scale - Math.abs(legSwing)*4*scale);
-  ctx.stroke();
-
-  // torso, mottled rotting flesh with a dried-blood underside
-  var tg = ctx.createRadialGradient(2*scale,0,2*scale, 0,0,13*scale);
-  tg.addColorStop(0, hi); tg.addColorStop(1, skin);
-  ctx.fillStyle = tg;
-  ctx.beginPath();
-  ctx.ellipse(0,0, 11*scale, 8.5*scale, 0, 0, Math.PI*2);
-  ctx.fill();
-  if (!flashed){
-    ctx.fillStyle = zz.blood; ctx.globalAlpha = 0.55;
-    ctx.beginPath(); ctx.ellipse(-2*scale, 3*scale, 6*scale, 4*scale, 0.3, 0, Math.PI*2); ctx.fill();
-    ctx.globalAlpha = 1;
-  }
-
-  // arms reaching toward target
-  ctx.strokeStyle = skin; ctx.lineWidth = 4.5*scale;
-  ctx.beginPath();
-  ctx.moveTo(3*scale, 5.5*scale);
-  ctx.lineTo(17*scale + armSwing*6*scale, 9*scale + armSwing*3*scale);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(3*scale, -5.5*scale);
-  ctx.lineTo(17*scale - armSwing*6*scale, -9*scale - armSwing*3*scale);
-  ctx.stroke();
-
-  // head
-  ctx.fillStyle = hi;
-  ctx.beginPath(); ctx.arc(8*scale, 0, 6.5*scale, 0, Math.PI*2); ctx.fill();
-
-  // sunken, sickly eyes -- dim, not glowing
-  ctx.shadowBlur = flashed?6:0; ctx.shadowColor = eye; ctx.fillStyle = eye;
-  ctx.beginPath(); ctx.arc(10.5*scale, -2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(10.5*scale, 2.3*scale, 1.5*scale, 0, Math.PI*2); ctx.fill();
-
-  ctx.restore();
-}
-
-function drawBoss(zz, sx, sy){
-  var pulse = 0.85+Math.sin(performance.now()/200)*0.15;
-  var flashed = zz.flash>0;
-  var skin = flashed?'#ffffff':zz.skin, hi = flashed?'#ffffff':zz.skinHi, eye = flashed?'#ffffff':zz.eye;
 
   ctx.save();
   ctx.translate(sx,sy);
   ctx.rotate(zz.angle||0);
 
-  ctx.save();
-  ctx.globalAlpha = 0.25;
-  ctx.strokeStyle = hi; ctx.shadowColor = hi; ctx.shadowBlur = 14; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.arc(0,0, zz.r*1.5*pulse, 0, Math.PI*2); ctx.stroke();
-  ctx.restore();
-
-  ctx.shadowColor = '#000'; ctx.shadowBlur = 9;
-  ctx.fillStyle = skin;
-  for (var i=0;i<8;i++){
-    var a = i/8*Math.PI*2 + zz.anim*0.3;
-    var bx = Math.cos(a)*zz.r*0.6, by = Math.sin(a)*zz.r*0.6;
-    var tx = Math.cos(a)*zz.r*1.15, ty = Math.sin(a)*zz.r*1.15;
-    ctx.beginPath();
-    ctx.moveTo(bx+Math.cos(a+1.6)*4, by+Math.sin(a+1.6)*4);
-    ctx.lineTo(tx,ty);
-    ctx.lineTo(bx+Math.cos(a-1.6)*4, by+Math.sin(a-1.6)*4);
-    ctx.closePath(); ctx.fill();
+  if (zz.type==='boss'){
+    var pulse = 0.85+Math.sin(performance.now()/200)*0.15;
+    ctx.save();
+    ctx.globalAlpha = 0.25;
+    ctx.strokeStyle = zz.skinHi; ctx.shadowColor = zz.skinHi; ctx.shadowBlur = 14; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(0,0, zz.r*1.5*pulse, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
   }
 
-  var g = ctx.createRadialGradient(0,0,zz.r*0.2,0,0,zz.r);
-  g.addColorStop(0,hi); g.addColorStop(1,skin);
-  ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(0,0, zz.r*0.85, 0, Math.PI*2); ctx.fill();
-
-  ctx.shadowBlur = 7; ctx.shadowColor = eye; ctx.fillStyle = eye;
-  ctx.beginPath(); ctx.arc(zz.r*0.15,0, zz.r*0.22*pulse, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(zz.r*0.55,-zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
-  ctx.beginPath(); ctx.arc(zz.r*0.55, zz.r*0.3, zz.r*0.09, 0, Math.PI*2); ctx.fill();
+  if (flashed) ctx.filter = 'brightness(2.6) grayscale(1)';
+  ctx.drawImage(img, -ZOMBIE_ANCHOR*scale, -ZOMBIE_ANCHOR*scale, ZSZ*scale, ZSZ*scale);
+  if (flashed) ctx.filter = 'none';
 
   ctx.restore();
 }
@@ -1093,18 +1305,22 @@ function drawObstacle(o, sx, sy){
     ctx.beginPath(); ctx.moveTo(-o.w/2,-o.h/2); ctx.lineTo(o.w/2,o.h/2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(o.w/2,-o.h/2); ctx.lineTo(-o.w/2,o.h/2); ctx.stroke();
   } else if (o.type==='car'){
-    var g2 = ctx.createLinearGradient(0,-o.h/2,0,o.h/2);
-    g2.addColorStop(0,'#3a3530'); g2.addColorStop(1,'#171513');
-    ctx.fillStyle = g2;
-    ctx.beginPath();
-    ctx.moveTo(-o.w/2,-o.h*0.3); ctx.lineTo(-o.w*0.3,-o.h/2); ctx.lineTo(o.w*0.25,-o.h/2);
-    ctx.lineTo(o.w/2,-o.h*0.25); ctx.lineTo(o.w/2,o.h*0.3); ctx.lineTo(-o.w/2,o.h*0.3);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.stroke();
-    ctx.fillStyle='rgba(120,150,140,0.35)';
-    ctx.fillRect(-o.w*0.15,-o.h*0.46,o.w*0.4,o.h*0.22);
-    ctx.fillStyle='#6b1810';
-    ctx.beginPath(); ctx.arc(-o.w*0.42,o.h*0.34,5,0,Math.PI*2); ctx.arc(o.w*0.4,o.h*0.34,5,0,Math.PI*2); ctx.fill();
+    if (o.tex){
+      ctx.drawImage(o.tex, -o.w/2, -o.h/2, o.w, o.h);
+    } else {
+      var g2 = ctx.createLinearGradient(0,-o.h/2,0,o.h/2);
+      g2.addColorStop(0,'#3a3530'); g2.addColorStop(1,'#171513');
+      ctx.fillStyle = g2;
+      ctx.beginPath();
+      ctx.moveTo(-o.w/2,-o.h*0.3); ctx.lineTo(-o.w*0.3,-o.h/2); ctx.lineTo(o.w*0.25,-o.h/2);
+      ctx.lineTo(o.w/2,-o.h*0.25); ctx.lineTo(o.w/2,o.h*0.3); ctx.lineTo(-o.w/2,o.h*0.3);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle='#000'; ctx.lineWidth=2; ctx.stroke();
+      ctx.fillStyle='rgba(120,150,140,0.35)';
+      ctx.fillRect(-o.w*0.15,-o.h*0.46,o.w*0.4,o.h*0.22);
+      ctx.fillStyle='#6b1810';
+      ctx.beginPath(); ctx.arc(-o.w*0.42,o.h*0.34,5,0,Math.PI*2); ctx.arc(o.w*0.4,o.h*0.34,5,0,Math.PI*2); ctx.fill();
+    }
   } else if (o.type==='trash'){
     ctx.fillStyle = '#4a4234';
     for (var i=0;i<4;i++){
@@ -1112,19 +1328,21 @@ function drawObstacle(o, sx, sy){
       ctx.beginPath(); ctx.ellipse(Math.cos(a)*6,Math.sin(a)*5,7,4,a,0,Math.PI*2); ctx.fill();
     }
   } else if (o.type==='house'){
-    var roofHues = ['#7a5a42','#6e6450','#80584a','#6a5e3a'];
-    var roofColor = roofHues[Math.floor(o.seed)%roofHues.length];
-    ctx.fillStyle = roofColor;
-    ctx.fillRect(-o.w/2,-o.h/2,o.w,o.h);
-    ctx.strokeStyle = '#2c241a'; ctx.lineWidth=3;
-    ctx.strokeRect(-o.w/2,-o.h/2,o.w,o.h);
-    // roof ridge
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth=2;
-    ctx.beginPath(); ctx.moveTo(-o.w/2,0); ctx.lineTo(o.w/2,0); ctx.stroke();
-    // collapsed/charred patch for the abandoned look
-    ctx.fillStyle = 'rgba(20,16,12,0.4)';
-    ctx.beginPath(); ctx.ellipse(o.w*0.22,o.h*0.15,o.w*0.16,o.h*0.22,0.2,0,Math.PI*2); ctx.fill();
-    // chimney
+    if (o.tex){
+      ctx.drawImage(o.tex, -o.w/2, -o.h/2, o.w, o.h);
+    } else {
+      var roofHues = ['#7a5a42','#6e6450','#80584a','#6a5e3a'];
+      var roofColor = roofHues[Math.floor(o.seed)%roofHues.length];
+      ctx.fillStyle = roofColor;
+      ctx.fillRect(-o.w/2,-o.h/2,o.w,o.h);
+      ctx.strokeStyle = '#2c241a'; ctx.lineWidth=3;
+      ctx.strokeRect(-o.w/2,-o.h/2,o.w,o.h);
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(-o.w/2,0); ctx.lineTo(o.w/2,0); ctx.stroke();
+      ctx.fillStyle = 'rgba(20,16,12,0.4)';
+      ctx.beginPath(); ctx.ellipse(o.w*0.22,o.h*0.15,o.w*0.16,o.h*0.22,0.2,0,Math.PI*2); ctx.fill();
+    }
+    // chimney pokes above the bounding box, drawn live on top of either path
     ctx.fillStyle = '#5a4a3e';
     ctx.fillRect(-o.w*0.32,-o.h/2-7,14,9);
   }
@@ -1145,8 +1363,12 @@ function draw(){
     var tile = groundTiles[gt];
     var ts = worldToScreen(tile.x,tile.y);
     if (!isOnScreen(ts[0]+tile.w/2,ts[1]+tile.h/2,Math.max(tile.w,tile.h)/2+40)) continue;
-    ctx.fillStyle = tile.color;
-    ctx.fillRect(ts[0],ts[1],tile.w,tile.h);
+    if (tile.tex){
+      ctx.drawImage(tile.tex, ts[0], ts[1], tile.w, tile.h);
+    } else {
+      ctx.fillStyle = tile.color;
+      ctx.fillRect(ts[0],ts[1],tile.w,tile.h);
+    }
   }
 
   // concrete perimeter barrier around the block
@@ -1225,8 +1447,7 @@ function draw(){
     var zz = zombies[z];
     var s = worldToScreen(zz.x,zz.y);
     if (!isOnScreen(s[0],s[1],zz.r+60)) continue;
-    if (zz.type==='boss') drawBoss(zz, s[0], s[1]);
-    else drawZombie(zz, s[0], s[1]);
+    drawZombieSprite(zz, s[0], s[1]);
     // health notch
     if (zz.hp < zz.maxHp){
       var hbw = zz.r*2;
@@ -1262,62 +1483,19 @@ function draw(){
       ctx.globalAlpha = 0.4;
     }
 
-    var moving = (Math.sqrt(stickL.dx*stickL.dx+stickL.dy*stickL.dy) > 0.12);
-    var legSwing = moving ? Math.sin(player.walkPhase)*0.6 : 0;
+    var frameIdx = Math.sin(player.walkPhase) > 0 ? 0 : 1;
+    var pimg = PLAYER_SPRITES[frameIdx];
+    ctx.drawImage(pimg,
+      -PLAYER_ANCHOR_X*PLAYER_PIX_SCALE, -PLAYER_ANCHOR_Y*PLAYER_PIX_SCALE,
+      PW*PLAYER_PIX_SCALE, PH*PLAYER_PIX_SCALE);
 
-    // legs, olive fatigues
-    ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
-    ctx.strokeStyle = '#3a3f2a'; ctx.lineWidth = 6; ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(-4,4); ctx.lineTo(-15 - legSwing*8, 11 + Math.abs(legSwing)*4);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(-4,-4); ctx.lineTo(-15 + legSwing*8, -11 - Math.abs(legSwing)*4);
-    ctx.stroke();
-
-    // rifle stock, slung back behind the shoulder
-    ctx.shadowBlur = 3; ctx.shadowColor = '#000';
-    ctx.fillStyle = '#221f18';
-    ctx.fillRect(-12,-2,10,4);
-
-    // tactical vest / torso, olive-drab with chest rig pouches
-    ctx.shadowBlur = 8; ctx.shadowColor = '#000';
-    var tgrad = ctx.createLinearGradient(-10,0,16,0);
-    tgrad.addColorStop(0,'#3c4530'); tgrad.addColorStop(1,'#6b7a4a');
-    ctx.fillStyle = tgrad;
-    ctx.beginPath();
-    ctx.moveTo(15,0); ctx.lineTo(3,10); ctx.lineTo(-11,6); ctx.lineTo(-11,-6); ctx.lineTo(3,-10);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = '#1c1f14'; ctx.lineWidth = 1.5; ctx.stroke();
-    ctx.fillStyle = '#23271a';
-    ctx.fillRect(0,-7,5,4); ctx.fillRect(0,3,5,4);
-
-    // helmet
-    ctx.shadowBlur = 5;
-    ctx.fillStyle = '#3a3a30';
-    ctx.beginPath(); ctx.arc(10,0,6.2,0,Math.PI*2); ctx.fill();
-    ctx.strokeStyle = '#1c1c16'; ctx.lineWidth = 1; ctx.stroke();
-    // ballistic goggles, no glow -- tactical, not gas-mask
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#15140f';
-    ctx.beginPath(); ctx.ellipse(12,0,3.2,2.1,0,0,Math.PI*2); ctx.fill();
-    ctx.fillStyle = 'rgba(150,165,150,0.55)';
-    ctx.beginPath(); ctx.ellipse(12.8,-0.6,1,0.6,0.3,0,Math.PI*2); ctx.fill();
-
-    // rifle: barrel + foregrip + magazine
-    ctx.shadowBlur = 4; ctx.shadowColor='#000';
-    ctx.fillStyle = '#1a1814';
-    ctx.fillRect(13,-1.6,23,3.2);
-    ctx.fillRect(20,-3,4,2);
-    ctx.fillStyle = '#221f18';
-    ctx.fillRect(17,1.6,4,7);
-
-    // muzzle flash
+    // muzzle flash, anchored just past the baked rifle's barrel tip
     if (player.muzzleFlash>0){
       ctx.save();
+      var mx = (25-PLAYER_ANCHOR_X)*PLAYER_PIX_SCALE;
       ctx.globalAlpha = Math.min(1, player.muzzleFlash/0.06);
       ctx.fillStyle = '#fff7cf'; ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 26;
-      ctx.beginPath(); ctx.moveTo(36,0); ctx.lineTo(50,-6); ctx.lineTo(50,6); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(mx,0); ctx.lineTo(mx+14,-6); ctx.lineTo(mx+14,6); ctx.closePath(); ctx.fill();
       ctx.restore();
     }
 
