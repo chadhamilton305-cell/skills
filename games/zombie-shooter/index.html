@@ -45,16 +45,34 @@ var W=0, H=0;
 var orientDismissed = false;
 
 function resize(){
-  W = window.innerWidth; H = window.innerHeight;
+  var vv = window.visualViewport;
+  W = vv ? vv.width : window.innerWidth;
+  H = vv ? vv.height : window.innerHeight;
   canvas.width = Math.floor(W*DPR);
   canvas.height = Math.floor(H*DPR);
   canvas.style.width = W+'px';
   canvas.style.height = H+'px';
   ctx.setTransform(DPR,0,0,DPR,0,0);
   if (H>W && !orientDismissed) orientEl.classList.add('show'); else orientEl.classList.remove('show');
+  updateStickAnchors();
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', function(){ setTimeout(resize,150); });
+if (window.visualViewport){
+  // Mobile browsers resize the *visual* viewport (not the page) when the
+  // address bar shows/hides, which otherwise desyncs the canvas from what's
+  // actually visible and makes the fixed-position joysticks look like they
+  // "jump" or vanish off-screen.
+  window.visualViewport.addEventListener('resize', resize);
+  window.visualViewport.addEventListener('scroll', function(){ window.scrollTo(0,0); });
+}
+// Belt-and-suspenders: the page should never be able to scroll (body is
+// position:fixed), but if any mobile browser quirk sneaks a scroll through
+// anyway, snap it back instantly so the canvas/joysticks never drift.
+window.addEventListener('scroll', function(){ window.scrollTo(0,0); }, {passive:true});
+document.addEventListener('touchstart', function(e){
+  if (e.target !== orientEl && !orientEl.contains(e.target)) e.preventDefault();
+}, {passive:false});
 function dismissOrient(e){
   orientDismissed = true;
   orientEl.classList.remove('show');
@@ -62,7 +80,6 @@ function dismissOrient(e){
 }
 orientEl.addEventListener('touchstart', dismissOrient, {passive:false});
 orientEl.addEventListener('click', dismissOrient);
-resize();
 
 // ---------- Audio ----------
 var actx = null;
@@ -118,15 +135,28 @@ var SFX = {
 };
 
 // ---------- Input: dual virtual joysticks ----------
-// Each stick is fully independent: it activates the instant its half of the
-// screen is touched and stays live until THAT SAME finger (matched by
-// identifier) lifts. Every event reconciles against e.touches (the
-// authoritative "what's still down" list) so a flaky touchend/touchcancel
-// on one finger can never drop or freeze the other stick.
-var stickL = {active:false, id:null, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
-var stickR = {active:false, id:null, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
+// Each stick lives at a FIXED screen anchor (bottom-left / bottom-right)
+// that never moves and is always drawn, so the player can find it by feel
+// without looking. Touching anywhere on that half of the screen grabs the
+// stick; dragging is measured from the fixed anchor, not from wherever the
+// finger landed. Each stick is fully independent: it activates the instant
+// its half of the screen is touched and stays live until THAT SAME finger
+// (matched by identifier) lifts. Every event reconciles against e.touches
+// (the authoritative "what's still down" list) so a flaky touchend/
+// touchcancel on one finger can never drop or freeze the other stick.
+var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
+var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0};
 var STICK_R_MAX = 85;
 var STICK_DEADZONE = 0.12;
+
+function updateStickAnchors(){
+  var marginX = Math.min(150, W*0.22);
+  var anchorY = H - Math.min(140, H*0.26);
+  stickL.anchorX = marginX; stickL.anchorY = anchorY;
+  stickR.anchorX = W - marginX; stickR.anchorY = anchorY;
+  if (!stickL.active){ stickL.baseX=stickL.anchorX; stickL.baseY=stickL.anchorY; stickL.x=stickL.anchorX; stickL.y=stickL.anchorY; }
+  if (!stickR.active){ stickR.baseX=stickR.anchorX; stickR.baseY=stickR.anchorY; stickR.x=stickR.anchorX; stickR.y=stickR.anchorY; }
+}
 
 function findTouchById(touchList, id){
   for (var i=0;i<touchList.length;i++){ if (touchList[i].identifier === id) return touchList[i]; }
@@ -135,11 +165,13 @@ function findTouchById(touchList, id){
 
 function stickActivate(s, t){
   s.active = true; s.id = t.identifier;
-  s.baseX = t.clientX; s.baseY = t.clientY;
-  s.x = t.clientX; s.y = t.clientY; s.dx=0; s.dy=0;
+  s.baseX = s.anchorX; s.baseY = s.anchorY;
+  stickMoveTo(s, t);
 }
 function stickRelease(s){
   s.active=false; s.id=null; s.dx=0; s.dy=0;
+  s.baseX = s.anchorX; s.baseY = s.anchorY;
+  s.x = s.anchorX; s.y = s.anchorY;
 }
 function stickMoveTo(s, t){
   var dx = t.clientX - s.baseX, dy = t.clientY - s.baseY;
@@ -193,6 +225,9 @@ function touchEndHandler(e){
 canvas.addEventListener('touchend', touchEndHandler, {passive:false});
 canvas.addEventListener('touchcancel', touchEndHandler, {passive:false});
 
+// stickL/stickR now exist, so it's safe to run the first real layout pass.
+resize();
+
 // Mouse fallback (desktop preview)
 var mouseDown=false, mouseBtn=0;
 canvas.addEventListener('mousedown', function(e){
@@ -201,21 +236,20 @@ canvas.addEventListener('mousedown', function(e){
   if (gameState === 'gameover'){ resetGame(); gameState='start'; startGame(); return; }
   mouseDown = true; mouseBtn = e.button;
   var s = e.clientX < W/2 ? stickL : stickR;
-  s.active=true; s.id='mouse'; s.baseX=e.clientX; s.baseY=e.clientY; s.x=e.clientX; s.y=e.clientY; s.dx=0; s.dy=0;
+  s.active=true; s.id='mouse';
+  s.baseX=s.anchorX; s.baseY=s.anchorY;
+  stickMoveTo(s, {clientX:e.clientX, clientY:e.clientY});
 });
 window.addEventListener('mousemove', function(e){
   if (!mouseDown) return;
   var s = (stickL.active && stickL.id==='mouse') ? stickL : (stickR.active && stickR.id==='mouse' ? stickR : null);
   if (!s) return;
-  var dx=e.clientX-s.baseX, dy=e.clientY-s.baseY;
-  var d=Math.sqrt(dx*dx+dy*dy);
-  if (d>STICK_R_MAX){ dx=dx/d*STICK_R_MAX; dy=dy/d*STICK_R_MAX; }
-  s.dx=dx/STICK_R_MAX; s.dy=dy/STICK_R_MAX;
+  stickMoveTo(s, {clientX:e.clientX, clientY:e.clientY});
 });
 window.addEventListener('mouseup', function(){
   mouseDown=false;
-  if (stickL.id==='mouse'){ stickL.active=false; stickL.id=null; stickL.dx=0; stickL.dy=0; }
-  if (stickR.id==='mouse'){ stickR.active=false; stickR.id=null; stickR.dx=0; stickR.dy=0; }
+  if (stickL.id==='mouse') stickRelease(stickL);
+  if (stickR.id==='mouse') stickRelease(stickR);
 });
 
 // Block iOS pinch-zoom / Safari gesture events and any stray scroll
@@ -228,7 +262,12 @@ document.addEventListener('dblclick', function(e){ e.preventDefault(); });
 function requestFS(){
   var el = document.documentElement;
   var req = el.requestFullscreen || el.webkitRequestFullscreen;
-  if (req){ try{ req.call(el); }catch(e){} }
+  if (req){
+    try{
+      var p = req.call(el);
+      if (p && p.catch) p.catch(function(){});
+    }catch(e){}
+  }
 }
 
 // ---------- Game constants ----------
@@ -300,6 +339,7 @@ function resetGame(){
     x:0, y:0, angle:0, hp:100, maxHp:100,
     speed:280, fireRate:6.5, lastShot:0,
     shieldTime:0, rapidTime:0, invuln:0,
+    shotgunTime:0, pierceTime:0, freezeTime:0, magnumTime:0,
     score:0, combo:1, comboTimer:0,
     muzzleFlash:0, walkPhase:0, r:16
   };
@@ -393,7 +433,24 @@ var ZTYPES = {
     skin:'#5c0018', skinHi:'#ff2050', eye:'#ffd0de', blood:'#400012'}
 };
 
+// Each weapon pickup counters a specific zombie threat:
+//  - shotgun: wide pellet cone, shreds clustered fast Runners
+//  - piercer: bullets punch through several targets, great vs lined-up Brutes/Bosses trailed by swarms
+//  - freeze:  slows every zombie on screen, buys breathing room when Runners swarm you
+//  - magnum:  huge per-shot damage + knockback, the answer to tanky Brutes and Bosses
+var PICKUP_DEFS = {
+  health:  {color:'#ff3b6e', sym:'+',  label:'+HEALTH'},
+  rapid:   {color:'#ffe93b', sym:'R',  label:'RAPID FIRE'},
+  shield:  {color:'#3bbcff', sym:'S',  label:'SHIELD'},
+  shotgun: {color:'#ff9a3c', sym:'SG', label:'SHOTGUN'},
+  piercer: {color:'#7be8ff', sym:'P',  label:'PIERCING ROUNDS'},
+  freeze:  {color:'#8fd9ff', sym:'F',  label:'FREEZE PULSE'},
+  magnum:  {color:'#ff5a3c', sym:'M',  label:'MAGNUM'},
+  nuke:    {color:'#b53bff', sym:'N',  label:'NUKE!'}
+};
+
 var MAX_ZOMBIES = 140;
+var zombieUidSeq = 1;
 
 function spawnZombie(type){
   if (zombies.length >= MAX_ZOMBIES) return;
@@ -405,6 +462,7 @@ function spawnZombie(type){
     tries++;
   } while (tries<12 && Math.hypot(x-player.x, y-player.y) < 500);
   zombies.push({
+    uid:zombieUidSeq++,
     x:x, y:y, type:type, hp:def.hp*(1+wave*0.04), maxHp:def.hp*(1+wave*0.04),
     speed:def.speed, r:def.r, dmg:def.dmg, color:def.color, glow:def.glow, score:def.score,
     skin:def.skin, skinHi:def.skinHi, eye:def.eye, blood:def.blood,
@@ -413,13 +471,17 @@ function spawnZombie(type){
   });
 }
 
+function safeVibrate(ms){
+  try{ if (navigator.vibrate) navigator.vibrate(ms); }catch(e){}
+}
+
 function damagePlayer(amount){
   if (player.shieldTime > 0 || player.invuln > 0) return;
   player.hp -= amount;
   player.invuln = 0.25;
   shake = Math.min(shake+8, 22);
   SFX.hurt();
-  if (navigator.vibrate) navigator.vibrate(40);
+  safeVibrate(40);
   if (player.hp <= 0){
     player.hp = 0;
     finalScore = Math.floor(player.score);
@@ -439,30 +501,47 @@ function killZombie(z, idx){
   player.combo = Math.min(player.combo+0.1, 5);
   player.comboTimer = 2.2;
   totalKills++; killsThisWave++;
-  if (navigator.vibrate) navigator.vibrate(z.type==='boss'?80:15);
+  safeVibrate(z.type==='boss'?80:15);
   SFX.death();
-  if (Math.random() < (z.type==='boss'?1:0.12)){
-    var types = ['health','rapid','shield'];
+  if (Math.random() < (z.type==='boss'?1:0.14)){
+    var types = ['health','rapid','shield','shotgun','piercer','freeze','magnum'];
     var t = types[Math.floor(Math.random()*types.length)];
-    if (Math.random()<0.06 || z.type==='boss') t='nuke';
+    if (Math.random()<0.05 || z.type==='boss') t='nuke';
     pickups.push({x:z.x,y:z.y,type:t,bob:0});
   }
   zombies.splice(idx,1);
 }
 
+function makeBullet(angle, speed, dmg, pierce, knockback){
+  return {
+    x: player.x + Math.cos(angle)*30,
+    y: player.y + Math.sin(angle)*30,
+    vx: Math.cos(angle)*speed,
+    vy: Math.sin(angle)*speed,
+    life: 1.1, dmg: dmg, pierce: pierce, knockback: knockback
+  };
+}
+
 function fireBullet(){
   var now = performance.now()/1000;
-  var rate = 1/(player.fireRate * (player.rapidTime>0?2.2:1));
+  var rateMul = (player.rapidTime>0?2.2:1) * (player.magnumTime>0?0.55:1);
+  var rate = 1/(player.fireRate * rateMul);
   if (now - player.lastShot < rate) return;
   player.lastShot = now;
   var speed = 760;
-  bullets.push({
-    x: player.x + Math.cos(player.angle)*30,
-    y: player.y + Math.sin(player.angle)*30,
-    vx: Math.cos(player.angle)*speed,
-    vy: Math.sin(player.angle)*speed,
-    life: 1.1, dmg: 11 + (player.rapidTime>0?3:0)
-  });
+  var dmg = 11 + (player.rapidTime>0?3:0) + (player.magnumTime>0?22:0);
+  var pierce = player.pierceTime>0;
+  var knockback = player.magnumTime>0 ? 30 : 0;
+
+  if (player.shotgunTime>0){
+    var pellets = 5, spread = 0.5;
+    for (var i=0;i<pellets;i++){
+      var off = (i-(pellets-1)/2)/(pellets-1)*spread;
+      bullets.push(makeBullet(player.angle+off, speed, Math.max(5,Math.floor(dmg*0.55)), pierce, knockback));
+    }
+  } else {
+    bullets.push(makeBullet(player.angle, speed, dmg, pierce, knockback));
+  }
   player.muzzleFlash = 0.06;
   SFX.shoot();
 }
@@ -497,6 +576,10 @@ function update(dt){
   if (player.invuln>0) player.invuln -= dt;
   if (player.shieldTime>0) player.shieldTime -= dt;
   if (player.rapidTime>0) player.rapidTime -= dt;
+  if (player.shotgunTime>0) player.shotgunTime -= dt;
+  if (player.pierceTime>0) player.pierceTime -= dt;
+  if (player.freezeTime>0) player.freezeTime -= dt;
+  if (player.magnumTime>0) player.magnumTime -= dt;
   if (player.comboTimer>0){ player.comboTimer -= dt; if (player.comboTimer<=0) player.combo = 1; }
 
   // bullets
@@ -524,8 +607,9 @@ function update(dt){
     var perp = Math.sin(z.wob)*0.4;
     var mx = nx - ny*perp, my = ny + nx*perp;
     var mlen2 = Math.sqrt(mx*mx+my*my)||1;
-    z.x += (mx/mlen2)*z.speed*dt;
-    z.y += (my/mlen2)*z.speed*dt;
+    var speedMul = player.freezeTime>0 ? 0.32 : 1;
+    z.x += (mx/mlen2)*z.speed*speedMul*dt;
+    z.y += (my/mlen2)*z.speed*speedMul*dt;
     z.x = Math.max(-ARENA_W/2+20, Math.min(ARENA_W/2-20, z.x));
     z.y = Math.max(-ARENA_H/2+20, Math.min(ARENA_H/2-20, z.y));
     resolveObstacles(z);
@@ -556,15 +640,29 @@ function update(dt){
     // bullet collisions
     for (var bi=bullets.length-1; bi>=0; bi--){
       var bl = bullets[bi];
+      if (bl.pierce && bl.hitMap && bl.hitMap[z.uid]) continue;
       var bdx = bl.x-z.x, bdy = bl.y-z.y;
       var bd = Math.sqrt(bdx*bdx+bdy*bdy);
       if (bd < z.r+6){
         z.hp -= bl.dmg;
         z.flash = 0.08;
         spawnParticles(bl.x,bl.y,z.glow,4,140,0.25);
-        bullets.splice(bi,1);
+        if (bl.knockback){
+          var bdlen = Math.sqrt(bl.vx*bl.vx+bl.vy*bl.vy)||1;
+          z.x += (bl.vx/bdlen)*bl.knockback; z.y += (bl.vy/bdlen)*bl.knockback;
+        }
         SFX.hit();
-        if (z.hp<=0){ killZombie(z, zi); break; }
+        var dead = z.hp<=0;
+        if (dead) killZombie(z, zi);
+        if (bl.pierce){
+          bl.hitMap = bl.hitMap || {};
+          bl.hitMap[z.uid] = true;
+          bl.pierceCount = (bl.pierceCount||0)+1;
+          if (bl.pierceCount >= 3) bullets.splice(bi,1);
+        } else {
+          bullets.splice(bi,1);
+        }
+        if (dead) break;
       }
     }
   }
@@ -632,10 +730,15 @@ function update(dt){
 
 function applyPickup(type){
   SFX.pickup();
-  if (navigator.vibrate) navigator.vibrate(25);
-  if (type==='health'){ player.hp = Math.min(player.maxHp, player.hp+35); addFloater(player.x,player.y-30,'+HEALTH','#ff3b6e'); }
-  else if (type==='rapid'){ player.rapidTime = 8; addFloater(player.x,player.y-30,'RAPID FIRE','#ffe93b'); }
-  else if (type==='shield'){ player.shieldTime = 7; addFloater(player.x,player.y-30,'SHIELD','#3bbcff'); }
+  safeVibrate(25);
+  var def = PICKUP_DEFS[type];
+  if (type==='health'){ player.hp = Math.min(player.maxHp, player.hp+35); }
+  else if (type==='rapid'){ player.rapidTime = 8; }
+  else if (type==='shield'){ player.shieldTime = 7; }
+  else if (type==='shotgun'){ player.shotgunTime = 10; }
+  else if (type==='piercer'){ player.pierceTime = 10; }
+  else if (type==='freeze'){ player.freezeTime = 6; }
+  else if (type==='magnum'){ player.magnumTime = 10; }
   else if (type==='nuke'){
     SFX.nuke(); shake = 22;
     for (var i=zombies.length-1;i>=0;i--){
@@ -644,8 +747,8 @@ function applyPickup(type){
       totalKills++;
       zombies.splice(i,1);
     }
-    addFloater(player.x,player.y-30,'NUKE!','#b53bff');
   }
+  addFloater(player.x,player.y-30,def.label,def.color);
 }
 
 // ---------- Draw ----------
@@ -886,12 +989,11 @@ function draw(){
     var pu = pickups[pk];
     var s = worldToScreen(pu.x,pu.y);
     var bob = Math.sin(pu.bob)*6;
-    var col = pu.type==='health'?'#ff3b6e':pu.type==='rapid'?'#ffe93b':pu.type==='shield'?'#3bbcff':'#b53bff';
-    drawGlowCircle(s[0],s[1]+bob,14,col,col,0.9);
+    var pdef = PICKUP_DEFS[pu.type];
+    drawGlowCircle(s[0],s[1]+bob,14,pdef.color,pdef.color,0.9);
     ctx.save();
-    ctx.fillStyle='#fff'; ctx.font='bold 14px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    var sym = pu.type==='health'?'+':pu.type==='rapid'?'R':pu.type==='shield'?'S':'N';
-    ctx.fillText(sym, s[0], s[1]+bob+1);
+    ctx.fillStyle='#fff'; ctx.font='bold 12px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(pdef.sym, s[0], s[1]+bob+1);
     ctx.restore();
   }
 
@@ -1005,6 +1107,15 @@ function draw(){
 
   ctx.restore(); // shake translate
 
+  // freeze pulse tint
+  if (player.freezeTime>0){
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.18, player.freezeTime*0.05);
+    ctx.fillStyle = '#8fd9ff';
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
+
   // vignette
   var grad = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.35,W/2,H/2,Math.max(W,H)*0.75);
   grad.addColorStop(0,'rgba(0,0,0,0)');
@@ -1056,8 +1167,7 @@ function drawHUD(){
 
   neonText('WAVE '+wave, W/2, 30, 16, '#fff', 'center');
 
-  if (player.rapidTime>0) neonText('RAPID', W/2-60, 56, 12, '#ffe93b','center');
-  if (player.shieldTime>0) neonText('SHIELD', W/2+60, 56, 12, '#3bbcff','center');
+  drawBuffs();
 
   if (waveBannerTime>0){
     var a = Math.min(1, waveBannerTime);
@@ -1068,28 +1178,44 @@ function drawHUD(){
   }
 }
 
+function drawBuffs(){
+  var buffs = [];
+  if (player.rapidTime>0) buffs.push({t:'RAPID', c:'#ffe93b'});
+  if (player.shieldTime>0) buffs.push({t:'SHIELD', c:'#3bbcff'});
+  if (player.shotgunTime>0) buffs.push({t:'SHOTGUN', c:'#ff9a3c'});
+  if (player.pierceTime>0) buffs.push({t:'PIERCE', c:'#7be8ff'});
+  if (player.freezeTime>0) buffs.push({t:'FREEZE', c:'#8fd9ff'});
+  if (player.magnumTime>0) buffs.push({t:'MAGNUM', c:'#ff5a3c'});
+  if (!buffs.length) return;
+  var spacing = 78;
+  var startX = W/2 - (buffs.length-1)*spacing/2;
+  for (var i=0;i<buffs.length;i++){
+    neonText(buffs[i].t, startX+i*spacing, 56, 11, buffs[i].c, 'center');
+  }
+}
+
 function drawSticks(){
   if (gameState!=='playing') return;
-  function ring(s, baseAlpha){
-    if (!s.active) return;
+  // Fixed-position rings: always drawn at the same spot whether or not a
+  // thumb is down, so the controls never "disappear" mid-fight. Active
+  // sticks glow brighter; idle ones stay dim but visible.
+  function ring(s, label, labelColor){
     ctx.save();
-    ctx.globalAlpha = baseAlpha;
-    ctx.strokeStyle = '#c9b98a'; ctx.lineWidth=2; ctx.shadowColor='#c9b98a'; ctx.shadowBlur=10;
-    ctx.beginPath(); ctx.arc(s.baseX, s.baseY, STICK_R_MAX, 0, Math.PI*2); ctx.stroke();
-    ctx.fillStyle='rgba(201,185,138,0.25)';
+    ctx.globalAlpha = s.active ? 0.65 : 0.3;
+    ctx.strokeStyle = '#c9b98a'; ctx.lineWidth=2; ctx.shadowColor='#c9b98a'; ctx.shadowBlur = s.active?12:4;
+    ctx.beginPath(); ctx.arc(s.anchorX, s.anchorY, STICK_R_MAX, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = s.active ? 'rgba(201,185,138,0.3)' : 'rgba(201,185,138,0.12)';
     ctx.beginPath(); ctx.arc(s.x, s.y, 22, 0, Math.PI*2); ctx.fill();
     ctx.restore();
+    if (!s.active){
+      ctx.save();
+      ctx.globalAlpha = 0.45 + Math.sin(performance.now()/300)*0.1;
+      neonText(label, s.anchorX, s.anchorY+STICK_R_MAX+22, 13, labelColor, 'center');
+      ctx.restore();
+    }
   }
-  ring(stickL, 0.55);
-  ring(stickR, 0.55);
-
-  if (!stickL.active && !stickR.active && wave<=1){
-    ctx.save();
-    ctx.globalAlpha = 0.5 + Math.sin(performance.now()/300)*0.15;
-    neonText('MOVE', W*0.18, H-40, 14, '#c9b98a','center');
-    neonText('AIM & FIRE', W*0.82, H-40, 14, '#ff5a3c','center');
-    ctx.restore();
-  }
+  ring(stickL, 'MOVE', '#c9b98a');
+  ring(stickR, 'AIM & FIRE', '#ff5a3c');
 }
 
 function drawStartScreen(){
