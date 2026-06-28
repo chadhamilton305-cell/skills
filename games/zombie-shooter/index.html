@@ -972,8 +972,12 @@ function frame(t){
   var dt = Math.min(0.033, (t-lastT)/1000);
   lastT = t;
   camX = player.x; camY = player.y;
-  update(dt);
-  draw();
+  try{
+    update(dt);
+    draw();
+  } catch(e){
+    console.error('frame error', e);
+  }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(function(t){ lastT=t; requestAnimationFrame(frame); });
