@@ -147,7 +147,7 @@ var SFX = {
 var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
 var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
 var STICK_R_MAX = 85;
-var STICK_DEADZONE = 0.12;
+var STICK_DEADZONE = 0.06;
 
 function updateStickAnchors(){
   var marginX = Math.min(150, W*0.22);
@@ -197,10 +197,11 @@ function stickMoveTo(s, t){
   }
 }
 
-// Drop any stick whose finger is no longer present in the live touch list,
-// regardless of how/why it disappeared (missed touchend, OS gesture
-// stealing the event, browser quirks, etc). This is what guarantees one
-// finger lifting can never leave the other stick stuck or dead.
+// Safety net for the rare missed-touchend case (finger lifted but the
+// browser never fired the event): only checked at touchstart time, which
+// fires far less often than touchmove, so a single coalesced/dropped
+// touchmove snapshot can never falsely release a stick mid-drag (that was
+// causing the joystick to "bounce back to center" during fast/wide drags).
 function reconcileTouches(touchList){
   if (stickL.active && !findTouchById(touchList, stickL.id)) stickRelease(stickL);
   if (stickR.active && !findTouchById(touchList, stickR.id)) stickRelease(stickR);
@@ -220,7 +221,9 @@ canvas.addEventListener('touchstart', function(e){
   e.preventDefault();
 }, {passive:false});
 canvas.addEventListener('touchmove', function(e){
-  reconcileTouches(e.touches);
+  // Deliberately does NOT reconcile against e.touches here -- only matches
+  // and updates sticks whose id is present. A finger is only ever released
+  // by an explicit touchend/touchcancel naming that exact identifier below.
   for (var i=0;i<e.touches.length;i++){
     var t = e.touches[i];
     if (stickL.active && stickL.id === t.identifier) stickMoveTo(stickL, t);
@@ -229,7 +232,11 @@ canvas.addEventListener('touchmove', function(e){
   e.preventDefault();
 }, {passive:false});
 function touchEndHandler(e){
-  reconcileTouches(e.touches);
+  for (var i=0;i<e.changedTouches.length;i++){
+    var id = e.changedTouches[i].identifier;
+    if (stickL.active && stickL.id === id) stickRelease(stickL);
+    if (stickR.active && stickR.id === id) stickRelease(stickR);
+  }
   e.preventDefault();
 }
 canvas.addEventListener('touchend', touchEndHandler, {passive:false});
