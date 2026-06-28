@@ -153,10 +153,17 @@ var SFX = {
 // (matched by identifier) lifts. Every event reconciles against e.touches
 // (the authoritative "what's still down" list) so a flaky touchend/
 // touchcancel on one finger can never drop or freeze the other stick.
-var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
-var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null};
+var stickL = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null, lastMoveT:0};
+var stickR = {active:false, id:null, anchorX:0, anchorY:0, baseX:0, baseY:0, x:0, y:0, dx:0, dy:0, lastClientX:null, lastClientY:null, smX:null, smY:null, lastMoveT:0};
 var STICK_R_MAX = 85;
 var STICK_DEADZONE = 0.06;
+// Raw touch coordinates carry a few pixels of digitizer noise every event.
+// Direction is atan2(dy,dx) of that vector, and atan2 is most sensitive to
+// noise exactly when the vector is short -- i.e. near the stick's center,
+// which is exactly where small deliberate directional nudges happen. A
+// short time-based low-pass on the touch position kills that jitter
+// without adding perceptible lag (it's fully caught up within ~3 frames).
+var STICK_SMOOTH_TAU = 0.035;
 
 function updateStickAnchors(){
   var marginX = Math.min(150, W*0.22);
@@ -183,6 +190,9 @@ function findTouchById(touchList, id){
 function stickActivate(s, t){
   s.active = true; s.id = t.identifier;
   s.baseX = s.anchorX; s.baseY = s.anchorY;
+  // Snap the smoothing filter straight to the grab point so there's no
+  // catch-up lag on the very first frame -- only later jitter gets damped.
+  s.smX = t.clientX; s.smY = t.clientY; s.lastMoveT = performance.now();
   stickMoveTo(s, t);
 }
 function stickRelease(s){
@@ -190,10 +200,20 @@ function stickRelease(s){
   s.baseX = s.anchorX; s.baseY = s.anchorY;
   s.x = s.anchorX; s.y = s.anchorY;
   s.lastClientX = null; s.lastClientY = null;
+  s.smX = null; s.smY = null;
 }
 function stickMoveTo(s, t){
   s.lastClientX = t.clientX; s.lastClientY = t.clientY;
-  var dx = t.clientX - s.baseX, dy = t.clientY - s.baseY;
+  var now = performance.now();
+  var elapsed = Math.min(0.1, Math.max(0, (now-(s.lastMoveT||now))/1000));
+  s.lastMoveT = now;
+  if (s.smX == null){ s.smX = t.clientX; s.smY = t.clientY; }
+  else {
+    var alpha = 1 - Math.exp(-elapsed/STICK_SMOOTH_TAU);
+    s.smX += (t.clientX-s.smX)*alpha;
+    s.smY += (t.clientY-s.smY)*alpha;
+  }
+  var dx = s.smX - s.baseX, dy = s.smY - s.baseY;
   var d = Math.sqrt(dx*dx+dy*dy);
   if (d > STICK_R_MAX){ dx = dx/d*STICK_R_MAX; dy = dy/d*STICK_R_MAX; d = STICK_R_MAX; }
   s.x = s.baseX+dx; s.y = s.baseY+dy;
