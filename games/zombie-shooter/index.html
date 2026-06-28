@@ -164,6 +164,14 @@ var STICK_DEADZONE = 0.06;
 // short time-based low-pass on the touch position kills that jitter
 // without adding perceptible lag (it's fully caught up within ~3 frames).
 var STICK_SMOOTH_TAU = 0.035;
+// Once the thumb is clearly away from the anchor it's an unambiguous,
+// deliberate drag -- not noise -- so we track it with zero added lag. The
+// smoothing filter above only kicks in inside this radius. Without this
+// split, changing direction mid-drag (curling the thumb to a new heading
+// without lifting) had to fight through ~3*tau of catch-up lag every time,
+// while lifting and re-tapping snapped instantly -- making drag-to-redirect
+// feel broken/unresponsive next to lift-and-retap.
+var STICK_SNAP_RADIUS = 16;
 
 function updateStickAnchors(){
   var marginX = Math.min(150, W*0.22);
@@ -236,9 +244,18 @@ function recomputeStick(s){
 // going even while the finger is perfectly still (see stickSetTarget above).
 function stickTick(s, dt){
   if (!s.active || s.lastClientX == null) return;
-  var alpha = 1 - Math.exp(-dt/STICK_SMOOTH_TAU);
-  s.smX += (s.lastClientX-s.smX)*alpha;
-  s.smY += (s.lastClientY-s.smY)*alpha;
+  var rawDx = s.lastClientX-s.baseX, rawDy = s.lastClientY-s.baseY;
+  var rawD = Math.sqrt(rawDx*rawDx+rawDy*rawDy);
+  if (rawD > STICK_SNAP_RADIUS){
+    // Clearly away from the anchor: a deliberate, unambiguous drag, not
+    // center noise. Track it with zero added lag so redirecting mid-drag
+    // feels as instant as lifting and re-tapping.
+    s.smX = s.lastClientX; s.smY = s.lastClientY;
+  } else {
+    var alpha = 1 - Math.exp(-dt/STICK_SMOOTH_TAU);
+    s.smX += (s.lastClientX-s.smX)*alpha;
+    s.smY += (s.lastClientY-s.smY)*alpha;
+  }
   recomputeStick(s);
 }
 
